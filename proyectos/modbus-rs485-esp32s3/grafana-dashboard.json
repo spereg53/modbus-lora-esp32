@@ -1,0 +1,579 @@
+{
+  "__inputs": [
+    {
+      "name": "DS_INFLUXDB",
+      "label": "InfluxDB",
+      "description": "InfluxDB 1.8 — influx.ismpgapp.com",
+      "type": "datasource",
+      "pluginId": "influxdb",
+      "pluginName": "InfluxDB"
+    }
+  ],
+  "__requires": [
+    { "type": "grafana",    "id": "grafana",    "name": "Grafana",    "version": "9.0.0" },
+    { "type": "datasource", "id": "influxdb",   "name": "InfluxDB",   "version": "1.0.0" },
+    { "type": "panel",      "id": "timeseries", "name": "Time series","version": "" },
+    { "type": "panel",      "id": "stat",       "name": "Stat",       "version": "" }
+  ],
+
+  "title": "ESP32-C3 Modbus LoRa — 6 Medidores PZEM",
+  "uid": "esp32c3-modbus",
+  "description": "3x ESP32-C3 + 2x PZEM-004T cada uno — Modbus RTU via LoRa611Pro → InfluxDB 1.8",
+  "tags": ["esp32", "modbus", "lora", "pzem", "influxdb"],
+  "timezone": "browser",
+  "refresh": "10s",
+  "schemaVersion": 36,
+  "version": 3,
+  "time": { "from": "now-1h", "to": "now" },
+
+  "templating": {
+    "list": [
+      {
+        "name": "slave",
+        "type": "custom",
+        "label": "ESP32 Slave",
+        "current": { "text": "All", "value": "$__all" },
+        "options": [
+          { "text": "All",     "value": "$__all", "selected": true },
+          { "text": "Slave 1", "value": "1" },
+          { "text": "Slave 2", "value": "2" },
+          { "text": "Slave 3", "value": "3" }
+        ],
+        "includeAll": true,
+        "multi": true,
+        "query": "1,2,3",
+        "hide": 0
+      },
+      {
+        "name": "meter",
+        "type": "custom",
+        "label": "Medidor",
+        "current": { "text": "All", "value": "$__all" },
+        "options": [
+          { "text": "All",      "value": "$__all", "selected": true },
+          { "text": "PZEM-A (0x01)", "value": "1" },
+          { "text": "PZEM-B (0x02)", "value": "2" }
+        ],
+        "includeAll": true,
+        "multi": true,
+        "query": "1,2",
+        "hide": 0
+      }
+    ]
+  },
+
+  "panels": [
+
+    {
+      "id": 1,
+      "type": "row",
+      "title": "⚡ Mediciones Eléctricas (6 medidores PZEM-004T)",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+
+    {
+      "id": 2,
+      "title": "Voltaje (V)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 0, "y": 1, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "volt",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true,
+        "refId": "A",
+        "alias": "S[[tag_slave_id]]-M[[tag_meter]]",
+        "query": "SELECT mean(\"voltage\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\", \"meter\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 3,
+      "title": "Corriente (A)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 8, "y": 1, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "amp",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true,
+        "refId": "A",
+        "alias": "S[[tag_slave_id]]-M[[tag_meter]]",
+        "query": "SELECT mean(\"current\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\", \"meter\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 4,
+      "title": "Potencia (W)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 16, "y": 1, "w": 8, "h": 8 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "watt",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true,
+        "refId": "A",
+        "alias": "S[[tag_slave_id]]-M[[tag_meter]]",
+        "query": "SELECT mean(\"power_w\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\", \"meter\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 15,
+      "title": "Energía acumulada (kWh)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 0, "y": 9, "w": 12, "h": 7 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "kwatth",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 }
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true,
+        "refId": "A",
+        "alias": "S[[tag_slave_id]]-M[[tag_meter]]",
+        "query": "SELECT mean(\"energy_kwh\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\", \"meter\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 16,
+      "title": "Frecuencia (Hz)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 12, "y": 9, "w": 6, "h": 7 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "hertz",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 },
+          "min": 58, "max": 62
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true,
+        "refId": "A",
+        "alias": "S[[tag_slave_id]]-M[[tag_meter]]",
+        "query": "SELECT mean(\"frequency\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\", \"meter\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 17,
+      "title": "Factor de Potencia",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 18, "y": 9, "w": 6, "h": 7 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 },
+          "min": 0, "max": 1
+        }
+      },
+      "options": {
+        "tooltip": { "mode": "multi" },
+        "legend": { "displayMode": "list", "placement": "bottom" }
+      },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true,
+        "refId": "A",
+        "alias": "S[[tag_slave_id]]-M[[tag_meter]]",
+        "query": "SELECT mean(\"pf\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\", \"meter\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 5,
+      "type": "row",
+      "title": "📊 Valores actuales — 6 medidores",
+      "gridPos": { "x": 0, "y": 16, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+
+    {
+      "id": 20,
+      "title": "S1 PZEM-A — Voltaje",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 0, "y": 17, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "volt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "blue", "value": null }, { "color": "green", "value": 110 }, { "color": "red", "value": 250 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"voltage\") FROM \"esp32_c3\" WHERE \"slave_id\" = '1' AND \"meter\" = '1'"
+      }]
+    },
+
+    {
+      "id": 21,
+      "title": "S1 PZEM-A — Potencia",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 4, "y": 17, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "watt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "orange", "value": 1000 }, { "color": "red", "value": 3000 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"power_w\") FROM \"esp32_c3\" WHERE \"slave_id\" = '1' AND \"meter\" = '1'"
+      }]
+    },
+
+    {
+      "id": 22,
+      "title": "S1 PZEM-B — Voltaje",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 8, "y": 17, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "volt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "blue", "value": null }, { "color": "green", "value": 110 }, { "color": "red", "value": 250 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"voltage\") FROM \"esp32_c3\" WHERE \"slave_id\" = '1' AND \"meter\" = '2'"
+      }]
+    },
+
+    {
+      "id": 23,
+      "title": "S1 PZEM-B — Potencia",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 12, "y": 17, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "watt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "orange", "value": 1000 }, { "color": "red", "value": 3000 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"power_w\") FROM \"esp32_c3\" WHERE \"slave_id\" = '1' AND \"meter\" = '2'"
+      }]
+    },
+
+    {
+      "id": 24,
+      "title": "S2 PZEM-A — Voltaje",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 16, "y": 17, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "volt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "blue", "value": null }, { "color": "green", "value": 110 }, { "color": "red", "value": 250 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"voltage\") FROM \"esp32_c3\" WHERE \"slave_id\" = '2' AND \"meter\" = '1'"
+      }]
+    },
+
+    {
+      "id": 25,
+      "title": "S2 PZEM-A — Potencia",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 20, "y": 17, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "watt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "orange", "value": 1000 }, { "color": "red", "value": 3000 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"power_w\") FROM \"esp32_c3\" WHERE \"slave_id\" = '2' AND \"meter\" = '1'"
+      }]
+    },
+
+    {
+      "id": 26,
+      "title": "S2 PZEM-B — Voltaje",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 0, "y": 20, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "volt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "blue", "value": null }, { "color": "green", "value": 110 }, { "color": "red", "value": 250 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"voltage\") FROM \"esp32_c3\" WHERE \"slave_id\" = '2' AND \"meter\" = '2'"
+      }]
+    },
+
+    {
+      "id": 27,
+      "title": "S2 PZEM-B — Potencia",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 4, "y": 20, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "watt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "orange", "value": 1000 }, { "color": "red", "value": 3000 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"power_w\") FROM \"esp32_c3\" WHERE \"slave_id\" = '2' AND \"meter\" = '2'"
+      }]
+    },
+
+    {
+      "id": 28,
+      "title": "S3 PZEM-A — Voltaje",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 8, "y": 20, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "volt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "blue", "value": null }, { "color": "green", "value": 110 }, { "color": "red", "value": 250 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"voltage\") FROM \"esp32_c3\" WHERE \"slave_id\" = '3' AND \"meter\" = '1'"
+      }]
+    },
+
+    {
+      "id": 29,
+      "title": "S3 PZEM-A — Potencia",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 12, "y": 20, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "watt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "orange", "value": 1000 }, { "color": "red", "value": 3000 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"power_w\") FROM \"esp32_c3\" WHERE \"slave_id\" = '3' AND \"meter\" = '1'"
+      }]
+    },
+
+    {
+      "id": 30,
+      "title": "S3 PZEM-B — Voltaje",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 16, "y": 20, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "volt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "blue", "value": null }, { "color": "green", "value": 110 }, { "color": "red", "value": 250 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"voltage\") FROM \"esp32_c3\" WHERE \"slave_id\" = '3' AND \"meter\" = '2'"
+      }]
+    },
+
+    {
+      "id": 31,
+      "title": "S3 PZEM-B — Potencia",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 20, "y": 20, "w": 4, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "watt", "color": { "mode": "thresholds" },
+        "thresholds": { "mode": "absolute", "steps": [
+          { "color": "green", "value": null }, { "color": "orange", "value": 1000 }, { "color": "red", "value": 3000 }
+        ]}
+      }},
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "colorMode": "background" },
+      "targets": [{ "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "query": "SELECT last(\"power_w\") FROM \"esp32_c3\" WHERE \"slave_id\" = '3' AND \"meter\" = '2'"
+      }]
+    },
+
+    {
+      "id": 9,
+      "type": "row",
+      "title": "🖥 Estado ESP32-C3",
+      "gridPos": { "x": 0, "y": 23, "w": 24, "h": 1 },
+      "collapsed": false
+    },
+
+    {
+      "id": 6,
+      "title": "Temperatura CPU (°C)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 0, "y": 24, "w": 8, "h": 7 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "celsius",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "green", "value": null }, { "color": "orange", "value": 60 }, { "color": "red", "value": 80 }
+          ]}
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "alias": "Slave [[tag_slave_id]]",
+        "query": "SELECT mean(\"temp_c\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 7,
+      "title": "RSSI WiFi (dBm)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 8, "y": 24, "w": 8, "h": 7 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "dBm",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "alias": "Slave [[tag_slave_id]]",
+        "query": "SELECT mean(\"rssi_dbm\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 8,
+      "title": "Free Heap (bytes)",
+      "type": "timeseries",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 16, "y": 24, "w": 8, "h": 7 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "bytes",
+          "color": { "mode": "palette-classic" },
+          "custom": { "lineWidth": 2, "fillOpacity": 8 }
+        }
+      },
+      "options": { "tooltip": { "mode": "multi" }, "legend": { "displayMode": "list", "placement": "bottom" } },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "alias": "Slave [[tag_slave_id]]",
+        "query": "SELECT mean(\"free_heap\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY time($__interval), \"slave_id\" fill(null)"
+      }]
+    },
+
+    {
+      "id": 13,
+      "title": "Uptime por Esclavo (s)",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 0, "y": 31, "w": 12, "h": 3 },
+      "fieldConfig": { "defaults": { "unit": "s", "color": { "mode": "palette-classic" } } },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "horizontal", "colorMode": "value" },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "alias": "Slave [[tag_slave_id]]",
+        "query": "SELECT last(\"uptime_s\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY \"slave_id\""
+      }]
+    },
+
+    {
+      "id": 14,
+      "title": "WiFi OK",
+      "type": "stat",
+      "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+      "gridPos": { "x": 12, "y": 31, "w": 12, "h": 3 },
+      "fieldConfig": {
+        "defaults": {
+          "unit": "none",
+          "mappings": [{ "type": "value", "options": {
+            "0": { "text": "SIN RED", "color": "red"   },
+            "1": { "text": "OK",      "color": "green" }
+          }}],
+          "color": { "mode": "thresholds" },
+          "thresholds": { "mode": "absolute", "steps": [
+            { "color": "red", "value": null }, { "color": "green", "value": 1 }
+          ]}
+        }
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"] }, "orientation": "horizontal", "colorMode": "background" },
+      "targets": [{
+        "datasource": { "type": "influxdb", "uid": "${DS_INFLUXDB}" },
+        "rawQuery": true, "refId": "A",
+        "alias": "Slave [[tag_slave_id]]",
+        "query": "SELECT last(\"wifi_ok\") FROM \"esp32_c3\" WHERE $timeFilter GROUP BY \"slave_id\""
+      }]
+    }
+
+  ]
+}
