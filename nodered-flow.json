@@ -1,0 +1,135 @@
+[
+  {
+    "id": "tab_modbus",
+    "type": "tab",
+    "label": "Modbus 3x ESP32-C3 LoRa",
+    "disabled": false,
+    "info": "3x ESP32-C3 SuperMini + PZEM-004T v3 — Modbus RTU via LoRa611Pro → InfluxDB 1.8"
+  },
+
+  {
+    "id": "modbus_client",
+    "type": "modbus-client",
+    "name": "ttyUSB0 → LoRa611Pro master",
+    "clienttype": "serial",
+    "bufferCommands": true,
+    "stateLogEnabled": false,
+    "queueLogEnabled": false,
+    "failureLogEnabled": true,
+    "serialPort": "/dev/ttyUSB0",
+    "serialType": "RTU",
+    "serialBaudrate": "9600",
+    "serialDatabits": "8",
+    "serialStopbits": "1",
+    "serialParity": "none",
+    "serialConnectionDelay": "200",
+    "commandDelay": "1000",
+    "clientTimeout": "15000",
+    "reconnectOnTimeout": true,
+    "reconnectTimeout": "3000",
+    "parallelUnitIdsAllowed": false
+  },
+
+  {
+    "id": "influx_config",
+    "type": "influxdb",
+    "name": "InfluxDB 1.8 local",
+    "hostname": "127.0.0.1",
+    "port": "8086",
+    "protocol": "http",
+    "database": "modbus",
+    "usetls": false,
+    "influxdbVersion": "1.x",
+    "url": "http://127.0.0.1:8086",
+    "rejectUnauthorized": false
+  },
+
+  {
+    "id": "inject_poll",
+    "type": "inject",
+    "name": "Poll cada 10s",
+    "repeat": "10",
+    "once": true,
+    "onceDelay": 1,
+    "payload": "",
+    "payloadType": "date",
+    "wires": [["build_requests"]]
+  },
+
+  {
+    "id": "build_requests",
+    "type": "function",
+    "name": "① Arma 3 requests (con delay LoRa)",
+    "func": "const slaves  = [1, 2, 3];\nconst delayMs = 1200;\n\nslaves.forEach((id, idx) => {\n    setTimeout(() => {\n        node.send({\n            topic:   'slave' + id,\n            slaveId: id,\n            payload: {\n                value:    0,\n                unitid:   id,\n                fc:       3,\n                address:  0,\n                quantity: 27    // 27 registros: 7xPZEM-A + 7xPZEM-B + 13 sistema\n            }\n        });\n    }, idx * delayMs);\n});\n\nreturn null;",
+    "outputs": 1,
+    "wires": [["flex_getter"]]
+  },
+
+  {
+    "id": "flex_getter",
+    "type": "modbus-flex-getter",
+    "name": "② Flex Getter",
+    "showStatusActivities": false,
+    "showErrors": true,
+    "logIOActivities": false,
+    "server": "modbus_client",
+    "useIOFile": false,
+    "emptyMsgOnFail": false,
+    "keepMsgProperties": true,
+    "wires": [["parse_response"], ["modbus_error"]]
+  },
+
+  {
+    "id": "parse_response",
+    "type": "function",
+    "name": "③ Parse respuesta Modbus (27 regs, 2 PZEM)",
+    "func": "const r = msg.payload;\nconst d = Array.isArray(r) ? r\n        : (r && Array.isArray(r.data)) ? r.data\n        : null;\n\nconst id = parseInt(String(msg.topic).replace('slave','')) || msg.slaveId || 0;\n\nif (!d || d.length < 27) {\n    node.warn('Slave ' + id + ' regs=' + (d ? d.length : 0) + ' (esperados 27)');\n    return null;\n}\n\nfunction u32(hi, lo) { return ((hi << 16) | lo) >>> 0; }\nfunction signed(v)   { return v > 32767 ? v - 65536 : v; }\n\n// Sistema (registros 14-26)\nconst ip      = d[14]+'.'+d[15]+'.'+d[16]+'.'+d[17];\nconst rssi    = signed(d[18]);\nconst heap    = u32(d[19], d[20]);\nconst uptime  = u32(d[21], d[22]);\nconst temp_c  = +(d[23] / 10).toFixed(1);\nconst slave_id = d[24] || id;\nconst fw_ver  = (d[25] / 100).toFixed(1);\nconst wifi_ok = d[26] === 1 ? 1 : 0;\nconst ts      = new Date().toISOString();\n\n// PZEM A (registros 0-6)\nconst whA = u32(d[3], d[4]);\nconst meterA = {\n    slave_id, meter: 1,\n    voltage:    +(d[0] / 10).toFixed(1),\n    current:    +(d[1] / 100).toFixed(2),\n    power_w:     d[2],\n    energy_wh:   whA,\n    energy_kwh: +(whA / 1000).toFixed(3),\n    frequency:  +(d[5] / 10).toFixed(1),\n    pf:         +(d[6] / 100).toFixed(2),\n    ip, rssi_dbm: rssi, free_heap: heap,\n    uptime_s: uptime, temp_c, fw_ver, wifi_ok, ts\n};\n\n// PZEM B (registros 7-13)\nconst whB = u32(d[10], d[11]);\nconst meterB = {\n    slave_id, meter: 2,\n    voltage:    +(d[7]  / 10).toFixed(1),\n    current:    +(d[8]  / 100).toFixed(2),\n    power_w:     d[9],\n    energy_wh:   whB,\n    energy_kwh: +(whB / 1000).toFixed(3),\n    frequency:  +(d[12] / 10).toFixed(1),\n    pf:         +(d[13] / 100).toFixed(2),\n    ip, rssi_dbm: rssi, free_heap: heap,\n    uptime_s: uptime, temp_c, fw_ver, wifi_ok, ts\n};\n\n// Envía 2 mensajes separados (uno por medidor)\nnode.send({ ...msg, topic: 'modbus/slave/' + slave_id + '/meter/1', payload: meterA });\nnode.send({ ...msg, topic: 'modbus/slave/' + slave_id + '/meter/2', payload: meterB });\nreturn null;",
+    "outputs": 1,
+    "wires": [["to_influx", "debug_out"]]
+  },
+
+  {
+    "id": "to_influx",
+    "type": "function",
+    "name": "④ Formatea para InfluxDB 1.8",
+    "func": "const d = msg.payload;\nconst sid = String(d.slave_id || 0);\nconst mid = String(d.meter || 0);\n\n// Formato array [[fields, tags]] — compatible con todas las versiones\n// Tags: slave_id (ESP32) + meter (1=PZEM-A, 2=PZEM-B)\nmsg.payload = [[\n    {\n        voltage    : d.voltage,\n        current    : d.current,\n        power_w    : parseInt(d.power_w),\n        energy_kwh : d.energy_kwh,\n        frequency  : d.frequency,\n        pf         : d.pf,\n        rssi_dbm   : parseInt(d.rssi_dbm),\n        free_heap  : parseInt(d.free_heap),\n        uptime_s   : parseInt(d.uptime_s),\n        temp_c     : d.temp_c,\n        wifi_ok    : parseInt(d.wifi_ok)\n    },\n    {\n        slave_id : sid,\n        meter    : mid,\n        ip       : d.ip,\n        fw_ver   : d.fw_ver\n    }\n]];\n\nreturn msg;",
+    "outputs": 1,
+    "wires": [["influx_out"]]
+  },
+
+  {
+    "id": "influx_out",
+    "type": "influxdb out",
+    "influxdb": "influx_config",
+    "name": "⑤ → InfluxDB  modbus.esp32_c3",
+    "measurement": "esp32_c3",
+    "precision": "ms",
+    "retentionPolicy": "",
+    "database": "modbus",
+    "wires": []
+  },
+
+  {
+    "id": "debug_out",
+    "type": "debug",
+    "name": "Debug datos",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "wires": []
+  },
+
+  {
+    "id": "modbus_error",
+    "type": "debug",
+    "name": "⚠ Errores Modbus",
+    "active": true,
+    "tosidebar": true,
+    "console": false,
+    "complete": "payload",
+    "targetType": "msg",
+    "wires": []
+  }
+]
