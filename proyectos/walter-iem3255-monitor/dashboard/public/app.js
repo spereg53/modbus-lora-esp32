@@ -8,6 +8,7 @@
 
   let lastReceivedAt = null;
   let liveHistory = []; // { fields, deviceTs, receivedAt } — buffer corto (en vivo)
+  let kwhInicioHoy = null; // contador de energía al inicio del día (para "consumo hoy")
 
   // ---------- sección "Último payload": oculta salvo que la URL traiga #raw ----------
   function syncRawSectionVisibility() {
@@ -73,6 +74,15 @@
     $('val-potenciaTotal').textContent = fmtPower(f.potenciaTotal, 'W');
     $('val-potenciaApTotal').textContent = fmtPower(f.potenciaApTotal, 'VA');
     $('val-potenciaReacTotal').textContent = fmtPower(f.potenciaReacTotal, 'VAr');
+
+    if (typeof f.energiaActivaTotalKwh === 'number' &&
+        f.energiaActivaTotalKwh >= 0 && f.energiaActivaTotalKwh < 1e8) {
+      $('val-energiaTotal').textContent = grouped(f.energiaActivaTotalKwh, 1) + ' kWh';
+      if (kwhInicioHoy != null) {
+        $('val-consumoHoy').textContent =
+          grouped(Math.max(0, f.energiaActivaTotalKwh - kwhInicioHoy), 2) + ' kWh';
+      }
+    }
 
     $('val-voltaje1').textContent = fmtRaw(f.voltaje1, 1, ' V');
     $('val-voltaje2').textContent = fmtRaw(f.voltaje2, 1, ' V');
@@ -235,6 +245,73 @@
   const FREQ_RANGE = { fixedRange: [59, 61], yTicks: [59, 59.5, 60, 60.5, 61], refLines: [60] };
   const PF_RANGE   = { fixedRange: [0, 1.05], yTicks: [0, 0.25, 0.5, 0.75, 1], refLines: [1] };
 
+  // ---------- gráfica de barras (consumo por día) ----------
+  function drawBarChart(canvas, labels, values, color) {
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    const dpr = window.devicePixelRatio || 1;
+    const cssW = canvas.clientWidth || 300;
+    const cssH = canvas.clientHeight || 180;
+    canvas.width = cssW * dpr;
+    canvas.height = cssH * dpr;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, cssW, cssH);
+
+    const nums = values.filter((v) => typeof v === 'number' && !Number.isNaN(v));
+    if (!nums.length) {
+      ctx.fillStyle = '#8b93a1';
+      ctx.font = '12px sans-serif';
+      ctx.fillText('Sin datos de consumo aún…', 8, cssH / 2);
+      return;
+    }
+
+    const marginL = 40, marginR = 8, marginT = 10, marginB = 22;
+    const w = cssW - marginL - marginR;
+    const h = cssH - marginT - marginB;
+    const yMax = Math.max(...nums) * 1.15 || 1;
+
+    // eje Y
+    const ticks = niceTicks(0, yMax, 4);
+    const dec = tickDecimals(ticks);
+    ctx.font = '10px sans-serif';
+    ctx.textAlign = 'right';
+    ctx.textBaseline = 'middle';
+    ticks.forEach((t) => {
+      const y = Math.round(marginT + h - (t / yMax) * h) + 0.5;
+      ctx.strokeStyle = 'rgba(139,147,161,0.15)';
+      ctx.beginPath();
+      ctx.moveTo(marginL, y); ctx.lineTo(marginL + w, y); ctx.stroke();
+      ctx.fillStyle = '#8b93a1';
+      ctx.fillText(t.toFixed(dec), marginL - 5, y);
+    });
+
+    // barras
+    const n = values.length;
+    const slot = w / n;
+    const bw = Math.min(slot * 0.7, 46);
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'top';
+    values.forEach((v, i) => {
+      const cx = marginL + slot * (i + 0.5);
+      if (typeof v === 'number' && !Number.isNaN(v)) {
+        const bh = (v / yMax) * h;
+        ctx.fillStyle = i === n - 1 ? '#f6ad55' : (color || '#4fd1c5'); // hoy en otro color
+        ctx.fillRect(cx - bw / 2, marginT + h - bh, bw, bh);
+        if (slot > 26) {
+          ctx.fillStyle = '#e6e8eb';
+          ctx.font = '10px sans-serif';
+          ctx.fillText(v.toFixed(v < 10 ? 1 : 0), cx, marginT + h - bh - 12);
+        }
+      }
+      // etiqueta de día (DD/MM), una de cada N si hay poco espacio
+      if (labels[i] && (n <= 16 || i % Math.ceil(n / 12) === 0 || i === n - 1)) {
+        ctx.fillStyle = '#8b93a1';
+        ctx.font = '9px sans-serif';
+        ctx.fillText(labels[i], cx, marginT + h + 6);
+      }
+    });
+  }
+
   // ---------- gráficas "en vivo" (buffer corto en memoria) ----------
   function liveSeriesOf(key) {
     return liveHistory.map((r) => (r.fields ? r.fields[key] : undefined));
@@ -312,13 +389,61 @@
     cargarHistorico(parseFloat(btn.dataset.horas));
   });
 
+  // ---------- consumo por día (SQLite vía /api/consumo-diario) ----------
+  let diasConsumo = 14;
+
+  async function cargarConsumoDiario(dias) {
+    diasConsumo = dias;
+    try {
+      const res = await fetch(`/api/consumo-diario?dias=${dias}`, { cache: 'no-store' });
+      const rows = await res.json();
+      if (!Array.isArray(rows)) return;
+
+      const labels = rows.map((r) => {
+        const [y, m, d] = r.dia.split('-');
+        return `${d}/${m}`;
+      });
+      const values = rows.map((r) => r.consumoKwh);
+      drawBarChart($('consumo-diario-chart'), labels, values, '#4fd1c5');
+
+      // "consumo hoy" en vivo: guarda el contador al inicio del día actual
+      const hoy = rows[rows.length - 1];
+      if (hoy && typeof hoy.kwhInicioDia === 'number') kwhInicioHoy = hoy.kwhInicioDia;
+
+      // resumen: promedio de los días COMPLETOS (todos menos el último)
+      const completos = values.slice(0, -1).filter((v) => typeof v === 'number');
+      const prom = completos.length
+        ? completos.reduce((a, b) => a + b, 0) / completos.length
+        : null;
+      $('consumo-resumen').textContent =
+        (hoy ? `hoy ${grouped(hoy.consumoKwh, 2)} kWh` : '') +
+        (prom != null ? `  ·  prom. ${grouped(prom, 2)} kWh/día` : '');
+    } catch (e) {
+      console.error('[consumo] error cargando:', e);
+    }
+  }
+
+  const consumoRangeSelector = $('consumoRangeSelector');
+  consumoRangeSelector.addEventListener('click', (ev) => {
+    const btn = ev.target.closest('button[data-dias]');
+    if (!btn) return;
+    consumoRangeSelector.querySelectorAll('button').forEach((b) => b.classList.remove('active'));
+    btn.classList.add('active');
+    cargarConsumoDiario(parseInt(btn.dataset.dias, 10));
+  });
+
   // refresca el histórico cada 2 minutos (sin interrumpir al usuario si está
   // viendo un rango específico)
   setInterval(() => cargarHistorico(horasActuales), 120000);
+  setInterval(() => cargarConsumoDiario(diasConsumo), 120000);
 
   window.addEventListener('resize', () => {
     clearTimeout(window.__resizeT);
-    window.__resizeT = setTimeout(() => { drawLiveCharts(); cargarHistorico(horasActuales); }, 200);
+    window.__resizeT = setTimeout(() => {
+      drawLiveCharts();
+      cargarHistorico(horasActuales);
+      cargarConsumoDiario(diasConsumo);
+    }, 200);
   });
 
   // ---------- WebSocket con reconexión + fallback a polling ----------
@@ -383,6 +508,7 @@
     .catch(() => {});
 
   cargarHistorico(horasActuales);
+  cargarConsumoDiario(diasConsumo);
   connectWS();
   updateStatusLoop();
 })();

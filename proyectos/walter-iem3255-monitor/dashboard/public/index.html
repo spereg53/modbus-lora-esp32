@@ -54,6 +54,16 @@
         <div class="big-value" id="val-potenciaApTotal">--</div>
       </div>
 
+      <div class="card">
+        <div class="card-title">Consumo hoy</div>
+        <div class="big-value" id="val-consumoHoy">--</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Energía activa total</div>
+        <div class="big-value" id="val-energiaTotal">--</div>
+      </div>
+
     </div>
 
     <h3 class="subsection-title">Tensión (L-N)</h3>
@@ -126,6 +136,26 @@
         <div class="legend">
           <span><i class="sw" style="background:#f6ad55"></i>FP</span>
         </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="hist-header">
+      <h2 class="section-title" style="margin:0">🔌 Consumo por día</h2>
+      <div class="range-selector" id="consumoRangeSelector">
+        <button data-dias="7">7d</button>
+        <button data-dias="14" class="active">14d</button>
+        <button data-dias="30">30d</button>
+      </div>
+    </div>
+    <div class="grid grid-1">
+      <div class="card chart-card">
+        <div class="card-title">
+          Energía activa consumida (kWh/día) ·
+          <span id="consumo-resumen" style="color:var(--text-dim)">--</span>
+        </div>
+        <canvas id="consumo-diario-chart" height="180"></canvas>
       </div>
     </div>
   </section>

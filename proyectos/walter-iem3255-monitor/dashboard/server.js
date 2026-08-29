@@ -15,6 +15,8 @@ const MQTT_TOPIC = process.env.MQTT_TOPIC || 'iem3255/walter01/state';
 const LIVE_BUFFER_LENGTH = parseInt(process.env.LIVE_BUFFER_LENGTH || '120', 10);
 const HISTORY_RETENTION_DAYS = parseInt(process.env.HISTORY_RETENTION_DAYS || '180', 10);
 const DB_PATH = process.env.DB_PATH || './data/iem3255.db';
+// Offset horario para agrupar el consumo por día (default: -6h, CDMX/Chiapas).
+const CONSUMO_TZ = process.env.CONSUMO_TZ || '-6 hours';
 
 // Campos numéricos del medidor que guardamos/graficamos.
 const CAMPOS = [
@@ -23,6 +25,7 @@ const CAMPOS = [
   'potencia1', 'potencia2', 'potencia3',
   'potenciaTotal', 'potenciaReacTotal', 'potenciaApTotal',
   'factorPotencia', 'frecuencia',
+  'energiaActivaTotalKwh',   // contador acumulado de energía activa (kWh)
 ];
 
 // ---- SQLite: histórico persistente ----
@@ -37,10 +40,20 @@ db.exec(`
     corriente1 REAL, corriente2 REAL, corriente3 REAL,
     potencia1 REAL, potencia2 REAL, potencia3 REAL,
     potenciaTotal REAL, potenciaReacTotal REAL, potenciaApTotal REAL,
-    factorPotencia REAL, frecuencia REAL
+    factorPotencia REAL, frecuencia REAL,
+    energiaActivaTotalKwh REAL
   );
   CREATE INDEX IF NOT EXISTS idx_lecturas_ts ON lecturas(ts);
 `);
+
+// Migración para bases de datos creadas antes de agregar la energía.
+const columnasExistentes = db.prepare('PRAGMA table_info(lecturas)').all().map((c) => c.name);
+for (const c of CAMPOS) {
+  if (!columnasExistentes.includes(c)) {
+    db.exec(`ALTER TABLE lecturas ADD COLUMN ${c} REAL`);
+    console.log(`[db] columna agregada: ${c}`);
+  }
+}
 
 const insertStmt = db.prepare(`
   INSERT INTO lecturas (ts, ${CAMPOS.join(', ')})
@@ -90,6 +103,38 @@ function pickCampos(row) {
   const out = {};
   for (const c of CAMPOS) out[c] = row[c] !== null && row[c] !== undefined ? Number(row[c]) : null;
   return out;
+}
+
+// Consumo de energía activa por día. energiaActivaTotalKwh es un contador
+// acumulado: el consumo del día = máximo - mínimo dentro de ese día (local).
+// Se descartan deltas negativos (reset del medidor / valores basura).
+function consultarConsumoDiario(dias) {
+  const desde = Math.floor(Date.now() / 1000) - (dias + 1) * 86400;
+  // Filtro anti-basura: descarta lecturas de energía absurdas (p.ej. las que
+  // publicó el firmware antes de corregir el orden de palabra del Int64).
+  const filas = db.prepare(`
+    SELECT date(ts, 'unixepoch', @tz) AS dia,
+           MIN(energiaActivaTotalKwh) AS lo,
+           MAX(energiaActivaTotalKwh) AS hi,
+           COUNT(energiaActivaTotalKwh) AS n
+    FROM lecturas
+    WHERE ts >= @desde
+      AND energiaActivaTotalKwh IS NOT NULL
+      AND energiaActivaTotalKwh >= 0
+      AND energiaActivaTotalKwh < 100000000
+    GROUP BY dia
+    ORDER BY dia ASC
+  `).all({ tz: CONSUMO_TZ, desde });
+
+  return filas
+    .map((f) => ({
+      dia: f.dia,
+      consumoKwh: f.hi != null && f.lo != null ? Math.max(0, f.hi - f.lo) : null,
+      kwhInicioDia: f.lo,
+      lecturas: f.n,
+    }))
+    .filter((f) => f.consumoKwh !== null)
+    .slice(-dias);
 }
 
 // ---- Estado en memoria (para /api/latest y el buffer "en vivo") ----
@@ -174,6 +219,17 @@ app.get('/api/history', (req, res) => {
   } catch (err) {
     console.error('[db] error consultando histórico:', err.message);
     res.status(500).json({ error: 'error consultando histórico' });
+  }
+});
+
+// Consumo por día (kWh). /api/consumo-diario?dias=14
+app.get('/api/consumo-diario', (req, res) => {
+  const dias = Math.max(1, Math.min(90, parseInt(req.query.dias, 10) || 14));
+  try {
+    res.json(consultarConsumoDiario(dias));
+  } catch (err) {
+    console.error('[db] error consultando consumo diario:', err.message);
+    res.status(500).json({ error: 'error consultando consumo diario' });
   }
 });
 

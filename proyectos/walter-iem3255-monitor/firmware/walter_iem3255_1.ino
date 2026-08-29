@@ -73,11 +73,13 @@
 //   3220  Energía Reactiva total entregada        (varh)
 //   3232  Energía Aparente total                  (VAh)
 //   3256  Energía Activa PARCIAL (reseteable)
-// kWh = valor / 1000.  El orden de palabra se confirma contra el display del
-// medidor (igual que se hizo con V/I/P): ver el log "[Energía]" y ajustar
-// ENERGIA_WORD_SWAP si el valor "std" es el correcto.
+// kWh = valor / 1000.
+// ORDEN DE PALABRA (confirmado contra display = 5.467 kWh):
+//   64 bits = [palabra 32b ALTA][palabra 32b BAJA], y cada palabra de 32 bits
+//   viene con el word bajo primero (CDAB), igual que los float de V/I/P.
+//   → hi32 = reg[1]<<16 | reg[0]      lo32 = reg[3]<<16 | reg[2]
+//     valor = hi32 * 2^32 + lo32
 #define ADDR_ENERGIA_ACT_TOT  3204
-#define ENERGIA_WORD_SWAP     1     // 1 = mismo orden que los float CDAB de este medidor
 
 HardwareSerial RS485Serial(1);
 ModbusMaster   node;
@@ -110,20 +112,13 @@ float leerFloatCDAB(uint16_t base, uint16_t addr) {
 }
 
 // ─── Int64 desde el buffer activo (4 registros de 16 bits) ────────────────
-// swap=0 → orden Schneider estándar (big-endian, palabra alta primero)
-// swap=1 → palabra baja primero (igual que los float CDAB de este medidor)
-uint64_t leerU64(uint16_t base, uint16_t addr, bool swap) {
+// Este medidor: dos palabras de 32 bits (alta, baja), cada una CDAB
+// (word bajo primero), igual que los float. Confirmado contra el display.
+uint64_t leerU64(uint16_t base, uint16_t addr) {
   uint16_t o = addr - base;
-  uint16_t w0 = node.getResponseBuffer(o);
-  uint16_t w1 = node.getResponseBuffer(o + 1);
-  uint16_t w2 = node.getResponseBuffer(o + 2);
-  uint16_t w3 = node.getResponseBuffer(o + 3);
-  if (swap) {
-    return ((uint64_t)w3 << 48) | ((uint64_t)w2 << 32) |
-           ((uint64_t)w1 << 16) |  (uint64_t)w0;
-  }
-  return ((uint64_t)w0 << 48) | ((uint64_t)w1 << 32) |
-         ((uint64_t)w2 << 16) |  (uint64_t)w3;
+  uint32_t hi = ((uint32_t)node.getResponseBuffer(o + 1) << 16) | node.getResponseBuffer(o);
+  uint32_t lo = ((uint32_t)node.getResponseBuffer(o + 3) << 16) | node.getResponseBuffer(o + 2);
+  return ((uint64_t)hi << 32) | lo;
 }
 
 // ─── Valida que un float del medidor sea publicable ───────────────────────
@@ -184,15 +179,13 @@ bool leerIEM3255() {
   delay(100);
   lectura.energiaValida = false;
   if (node.readHoldingRegisters(ADDR_ENERGIA_ACT_TOT, 4) == node.ku8MBSuccess) {
-    uint64_t wh_std  = leerU64(ADDR_ENERGIA_ACT_TOT, ADDR_ENERGIA_ACT_TOT, false);
-    uint64_t wh_swap = leerU64(ADDR_ENERGIA_ACT_TOT, ADDR_ENERGIA_ACT_TOT, true);
-    Serial.printf("[Energía] raw regs: %04X %04X %04X %04X\n",
-      node.getResponseBuffer(0), node.getResponseBuffer(1),
-      node.getResponseBuffer(2), node.getResponseBuffer(3));
-    Serial.printf("[Energía] std=%.3f kWh   swap=%.3f kWh  (comparar con display)\n",
-      wh_std / 1000.0, wh_swap / 1000.0);
-    lectura.energiaActivaTotal = (ENERGIA_WORD_SWAP ? wh_swap : wh_std) / 1000.0;
+    uint64_t wh = leerU64(ADDR_ENERGIA_ACT_TOT, ADDR_ENERGIA_ACT_TOT);
+    lectura.energiaActivaTotal = wh / 1000.0;
     lectura.energiaValida = true;
+    Serial.printf("[Energía] raw: %04X %04X %04X %04X  => %.3f kWh\n",
+      node.getResponseBuffer(0), node.getResponseBuffer(1),
+      node.getResponseBuffer(2), node.getResponseBuffer(3),
+      lectura.energiaActivaTotal);
   } else {
     Serial.println("[Modbus] Error bloque energía (3204)");
   }
@@ -270,10 +263,12 @@ void escanearEnergia(uint16_t desde, uint16_t n) {
     uint16_t w0 = node.getResponseBuffer(i),     w1 = node.getResponseBuffer(i + 1);
     uint16_t w2 = node.getResponseBuffer(i + 2), w3 = node.getResponseBuffer(i + 3);
     if (!(w0 | w1 | w2 | w3)) continue;
-    uint64_t std  = ((uint64_t)w0<<48)|((uint64_t)w1<<32)|((uint64_t)w2<<16)|w3;
-    uint64_t swap = ((uint64_t)w3<<48)|((uint64_t)w2<<32)|((uint64_t)w1<<16)|w0;
-    Serial.printf("    @%u: %04X %04X %04X %04X  std=%.3f  swap=%.3f\n",
-      desde + i, w0, w1, w2, w3, std / 1000.0, swap / 1000.0);
+    // orden de este medidor: hi32 = w1:w0 (CDAB), lo32 = w3:w2 (CDAB)
+    uint64_t hi = ((uint32_t)w1 << 16) | w0;
+    uint64_t lo = ((uint32_t)w3 << 16) | w2;
+    uint64_t v  = (hi << 32) | lo;
+    Serial.printf("    @%u: %04X %04X %04X %04X  => %.3f kWh\n",
+      desde + i, w0, w1, w2, w3, v / 1000.0);
   }
 }
 
