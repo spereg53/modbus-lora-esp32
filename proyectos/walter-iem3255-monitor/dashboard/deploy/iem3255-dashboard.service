@@ -1,0 +1,23 @@
+[Unit]
+Description=Schneider iEM3255 dashboard (Node.js) — via Walter/MQTT
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=www-data
+Group=www-data
+WorkingDirectory=/opt/iem3255-dashboard
+EnvironmentFile=/opt/iem3255-dashboard/.env
+ExecStart=/usr/bin/node /opt/iem3255-dashboard/server.js
+Restart=always
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+# ProtectSystem=full deja todo el filesystem de solo lectura salvo lo que se
+# liste aquí — el server.js necesita escribir el archivo SQLite en ./data
+ReadWritePaths=/opt/iem3255-dashboard/data
+
+[Install]
+WantedBy=multi-user.target

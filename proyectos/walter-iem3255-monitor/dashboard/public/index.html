@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>iEM3255 — Medidor</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="topbar-title">
+    <h1>Schneider iEM3255</h1>
+    <span class="subtitle">Walter (RS-485/Modbus) → iem3255/walter01/state</span>
+  </div>
+  <div class="status" id="status">
+    <span class="dot" id="statusDot"></span>
+    <span id="statusText">Conectando…</span>
+    <span class="lastUpdate" id="lastUpdate"></span>
+  </div>
+</header>
+
+<main>
+
+  <section class="section">
+    <h2 class="section-title">⚡ Instantáneo</h2>
+    <div class="grid grid-4">
+
+      <div class="card gauge-card">
+        <div class="card-title">Frecuencia</div>
+        <svg class="gauge" viewBox="0 0 120 70">
+          <path class="gauge-bg" d="M10,65 A50,50 0 0,1 110,65"></path>
+          <path class="gauge-value" id="gauge-frecuencia" d="M10,65 A50,50 0 0,1 110,65"></path>
+        </svg>
+        <div class="gauge-readout" id="val-frecuencia">-- Hz</div>
+      </div>
+
+      <div class="card gauge-card">
+        <div class="card-title">Factor de Potencia</div>
+        <svg class="gauge" viewBox="0 0 120 70">
+          <path class="gauge-bg" d="M10,65 A50,50 0 0,1 110,65"></path>
+          <path class="gauge-value" id="gauge-factorPotencia" d="M10,65 A50,50 0 0,1 110,65"></path>
+        </svg>
+        <div class="gauge-readout" id="val-factorPotencia">--</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Potencia Activa Total</div>
+        <div class="big-value" id="val-potenciaTotal">--</div>
+      </div>
+
+      <div class="card">
+        <div class="card-title">Potencia Aparente Total</div>
+        <div class="big-value" id="val-potenciaApTotal">--</div>
+      </div>
+
+    </div>
+
+    <h3 class="subsection-title">Tensión (L-N)</h3>
+    <div class="grid grid-3">
+      <div class="card"><div class="card-title">V1</div><div class="big-value" id="val-voltaje1">--</div></div>
+      <div class="card"><div class="card-title">V2</div><div class="big-value" id="val-voltaje2">--</div></div>
+      <div class="card"><div class="card-title">V3</div><div class="big-value" id="val-voltaje3">--</div></div>
+    </div>
+
+    <h3 class="subsection-title">Corriente</h3>
+    <div class="grid grid-3">
+      <div class="card"><div class="card-title">I1</div><div class="big-value" id="val-corriente1">--</div></div>
+      <div class="card"><div class="card-title">I2</div><div class="big-value" id="val-corriente2">--</div></div>
+      <div class="card"><div class="card-title">I3</div><div class="big-value" id="val-corriente3">--</div></div>
+    </div>
+
+    <h3 class="subsection-title">Potencia Activa por fase</h3>
+    <div class="grid grid-3">
+      <div class="card"><div class="card-title">P1</div><div class="big-value small" id="val-potencia1">--</div></div>
+      <div class="card"><div class="card-title">P2</div><div class="big-value small" id="val-potencia2">--</div></div>
+      <div class="card"><div class="card-title">P3</div><div class="big-value small" id="val-potencia3">--</div></div>
+    </div>
+
+    <h3 class="subsection-title">Potencia Reactiva Total</h3>
+    <div class="grid grid-3">
+      <div class="card"><div class="card-title">Q total</div><div class="big-value small" id="val-potenciaReacTotal">--</div></div>
+    </div>
+  </section>
+
+  <section class="section">
+    <h2 class="section-title">📈 Tendencia en vivo (últimas lecturas)</h2>
+    <div class="grid grid-2">
+      <div class="card chart-card">
+        <div class="card-title">Tensión por fase</div>
+        <canvas id="live-chart-v" height="140"></canvas>
+        <div class="legend">
+          <span><i class="sw" style="background:#4fd1c5"></i>V1</span>
+          <span><i class="sw" style="background:#f6ad55"></i>V2</span>
+          <span><i class="sw" style="background:#63b3ed"></i>V3</span>
+        </div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-title">Corriente por fase</div>
+        <canvas id="live-chart-i" height="140"></canvas>
+        <div class="legend">
+          <span><i class="sw" style="background:#4fd1c5"></i>I1</span>
+          <span><i class="sw" style="background:#f6ad55"></i>I2</span>
+          <span><i class="sw" style="background:#63b3ed"></i>I3</span>
+        </div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-title">Potencias P / Q / S total</div>
+        <canvas id="live-chart-power" height="140"></canvas>
+        <div class="legend">
+          <span><i class="sw" style="background:#4fd1c5"></i>P (kW)</span>
+          <span><i class="sw" style="background:#f6ad55"></i>Q (kVAr)</span>
+          <span><i class="sw" style="background:#63b3ed"></i>S (kVA)</span>
+        </div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-title">Frecuencia</div>
+        <canvas id="live-chart-f" height="140"></canvas>
+        <div class="legend">
+          <span><i class="sw" style="background:#4fd1c5"></i>f (Hz)</span>
+        </div>
+      </div>
+      <div class="card chart-card">
+        <div class="card-title">Factor de Potencia</div>
+        <canvas id="live-chart-fp" height="140"></canvas>
+        <div class="legend">
+          <span><i class="sw" style="background:#f6ad55"></i>FP</span>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
+    <div class="hist-header">
+      <h2 class="section-title" style="margin:0">🗄 Histórico</h2>
+      <div class="range-selector" id="rangeSelector">
+        <button data-horas="1">1h</button>
+        <button data-horas="24" class="active">24h</button>
+        <button data-horas="168">7d</button>
+        <button data-horas="720">30d</button>
+      </div>
+    </div>
+    <div class="grid grid-2">
+      <div class="card chart-card">
+        <div class="card-title">Tensión por fase</div>
+        <canvas id="hist-chart-v" height="140"></canvas>
+      </div>
+      <div class="card chart-card">
+        <div class="card-title">Corriente por fase</div>
+        <canvas id="hist-chart-i" height="140"></canvas>
+      </div>
+      <div class="card chart-card">
+        <div class="card-title">Potencias P / Q / S total</div>
+        <canvas id="hist-chart-power" height="140"></canvas>
+      </div>
+      <div class="card chart-card">
+        <div class="card-title">Frecuencia</div>
+        <canvas id="hist-chart-f" height="140"></canvas>
+      </div>
+      <div class="card chart-card">
+        <div class="card-title">Factor de Potencia</div>
+        <canvas id="hist-chart-fp" height="140"></canvas>
+      </div>
+    </div>
+  </section>
+
+  <!-- Oculta por defecto. Se muestra solo si la URL trae #raw -->
+  <section class="section" id="raw-section" hidden>
+    <h2 class="section-title">🗂 Último payload</h2>
+    <div class="card">
+      <pre id="raw-json">--</pre>
+    </div>
+  </section>
+
+</main>
+
+<footer>
+  <span>Schneider iEM3255 · Walter (Quickspot/DPTechnics) · MQTT vía mqtt.ocean53.xyz</span>
+</footer>
+
+<script src="app.js"></script>
+</body>
+</html>
