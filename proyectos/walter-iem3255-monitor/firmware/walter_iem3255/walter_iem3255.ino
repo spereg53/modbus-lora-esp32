@@ -302,7 +302,7 @@ bool inicializarModem() {
     return false;
   }
 
-  if (!modem.definePDPContext(&modemRsp, APN_TELCEL)) {
+  if (!modem.definePDPContext(1, APN_TELCEL, &modemRsp)) {
     Serial.println("[Modem] Error definiendo contexto PDP (revisa el APN)");
     return false;
   }
@@ -314,7 +314,10 @@ bool inicializarModem() {
 
   Serial.println("[Modem] Esperando registro en la red Telcel...");
   unsigned long inicio = millis();
-  while (!modem.isNetworkRegistered()) {
+  while (true) {
+    WalterModemNetworkRegState reg = modem.getNetworkRegState();
+    if (reg == WALTER_MODEM_NETWORK_REG_REGISTERED_HOME ||
+        reg == WALTER_MODEM_NETWORK_REG_REGISTERED_ROAMING) break;
     delay(500);
     Serial.print(".");
     if (millis() - inicio > 120000UL) {
