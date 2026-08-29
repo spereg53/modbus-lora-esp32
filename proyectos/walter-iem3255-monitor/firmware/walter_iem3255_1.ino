@@ -66,6 +66,19 @@
 #define ADDR_S    0      // 0 = pendiente
 #define ADDR_FREQ 3108   // confirmado: 60.0 Hz
 
+// ── Energía (consumo acumulado) ─────────────────────────────────────────────
+// Mapa Modbus oficial iEM3000 series (FC03, Int64 = 4 registros, unidad Wh):
+//   3204  Energía Activa TOTAL entregada (import / consumo)  ← el que quieres
+//   3208  Energía Activa total recibida (export)
+//   3220  Energía Reactiva total entregada        (varh)
+//   3232  Energía Aparente total                  (VAh)
+//   3256  Energía Activa PARCIAL (reseteable)
+// kWh = valor / 1000.  El orden de palabra se confirma contra el display del
+// medidor (igual que se hizo con V/I/P): ver el log "[Energía]" y ajustar
+// ENERGIA_WORD_SWAP si el valor "std" es el correcto.
+#define ADDR_ENERGIA_ACT_TOT  3204
+#define ENERGIA_WORD_SWAP     1     // 1 = mismo orden que los float CDAB de este medidor
+
 HardwareSerial RS485Serial(1);
 ModbusMaster   node;
 WalterModem    modem;
@@ -82,6 +95,8 @@ struct LecturaIEM3255 {
   float potencia1, potencia2, potencia3;
   float potenciaTotal, potenciaReacTotal, potenciaApTotal;
   float factorPotencia, frecuencia;
+  double energiaActivaTotal;   // kWh acumulados (consumo)
+  bool  energiaValida;
   bool  valida;
 } lectura;
 
@@ -92,6 +107,23 @@ float leerFloatCDAB(uint16_t base, uint16_t addr) {
                            | node.getResponseBuffer(off);
   float v; memcpy(&v, &raw, 4);
   return v;
+}
+
+// ─── Int64 desde el buffer activo (4 registros de 16 bits) ────────────────
+// swap=0 → orden Schneider estándar (big-endian, palabra alta primero)
+// swap=1 → palabra baja primero (igual que los float CDAB de este medidor)
+uint64_t leerU64(uint16_t base, uint16_t addr, bool swap) {
+  uint16_t o = addr - base;
+  uint16_t w0 = node.getResponseBuffer(o);
+  uint16_t w1 = node.getResponseBuffer(o + 1);
+  uint16_t w2 = node.getResponseBuffer(o + 2);
+  uint16_t w3 = node.getResponseBuffer(o + 3);
+  if (swap) {
+    return ((uint64_t)w3 << 48) | ((uint64_t)w2 << 32) |
+           ((uint64_t)w1 << 16) |  (uint64_t)w0;
+  }
+  return ((uint64_t)w0 << 48) | ((uint64_t)w1 << 32) |
+         ((uint64_t)w2 << 16) |  (uint64_t)w3;
 }
 
 // ─── Valida que un float del medidor sea publicable ───────────────────────
@@ -148,6 +180,23 @@ bool leerIEM3255() {
     Serial.println("[Modbus] Error bloque frecuencia");
   }
 
+  // — Energía Activa Total (consumo): Int64 en 3204-3207, unidad Wh ————————
+  delay(100);
+  lectura.energiaValida = false;
+  if (node.readHoldingRegisters(ADDR_ENERGIA_ACT_TOT, 4) == node.ku8MBSuccess) {
+    uint64_t wh_std  = leerU64(ADDR_ENERGIA_ACT_TOT, ADDR_ENERGIA_ACT_TOT, false);
+    uint64_t wh_swap = leerU64(ADDR_ENERGIA_ACT_TOT, ADDR_ENERGIA_ACT_TOT, true);
+    Serial.printf("[Energía] raw regs: %04X %04X %04X %04X\n",
+      node.getResponseBuffer(0), node.getResponseBuffer(1),
+      node.getResponseBuffer(2), node.getResponseBuffer(3));
+    Serial.printf("[Energía] std=%.3f kWh   swap=%.3f kWh  (comparar con display)\n",
+      wh_std / 1000.0, wh_swap / 1000.0);
+    lectura.energiaActivaTotal = (ENERGIA_WORD_SWAP ? wh_swap : wh_std) / 1000.0;
+    lectura.energiaValida = true;
+  } else {
+    Serial.println("[Modbus] Error bloque energía (3204)");
+  }
+
   lectura.valida = true;
 
   Serial.println("─────────────────────────────────────");
@@ -158,6 +207,8 @@ bool leerIEM3255() {
   Serial.printf("Ptotal=%.4fkW  Q=%.4f  S=%.4f  FP=%.4f  f=%.2fHz\n",
     lectura.potenciaTotal, lectura.potenciaReacTotal,
     lectura.potenciaApTotal, lectura.factorPotencia, lectura.frecuencia);
+  if (lectura.energiaValida)
+    Serial.printf("Energía activa total = %.3f kWh\n", lectura.energiaActivaTotal);
   Serial.println("─────────────────────────────────────");
   return true;
 }
@@ -181,6 +232,7 @@ String armarPayloadJSON() {
   if (esValido(lectura.potenciaApTotal))   doc["potenciaApTotal"]   = lectura.potenciaApTotal;
   if (esValido(lectura.factorPotencia))    doc["factorPotencia"]    = lectura.factorPotencia;
   if (esValido(lectura.frecuencia))        doc["frecuencia"]        = lectura.frecuencia;
+  if (lectura.energiaValida)               doc["energiaActivaTotalKwh"] = lectura.energiaActivaTotal;
   String s; serializeJson(doc, s); return s;
 }
 
@@ -205,6 +257,26 @@ void escanearBloque(uint16_t desde, uint16_t n) {
   }
 }
 
+// Vuelca un bloque interpretando cada 4 registros como Int64 (energía),
+// en los dos órdenes de palabra, en kWh (÷1000). Comparar con el display.
+void escanearEnergia(uint16_t desde, uint16_t n) {
+  delay(80);
+  Serial.printf("  [%u-%u] Int64/kWh\n", desde, desde + n - 1);
+  if (node.readHoldingRegisters(desde, n) != node.ku8MBSuccess) {
+    Serial.println("   ERR");
+    return;
+  }
+  for (uint16_t i = 0; i + 3 < n; i += 2) {
+    uint16_t w0 = node.getResponseBuffer(i),     w1 = node.getResponseBuffer(i + 1);
+    uint16_t w2 = node.getResponseBuffer(i + 2), w3 = node.getResponseBuffer(i + 3);
+    if (!(w0 | w1 | w2 | w3)) continue;
+    uint64_t std  = ((uint64_t)w0<<48)|((uint64_t)w1<<32)|((uint64_t)w2<<16)|w3;
+    uint64_t swap = ((uint64_t)w3<<48)|((uint64_t)w2<<32)|((uint64_t)w1<<16)|w0;
+    Serial.printf("    @%u: %04X %04X %04X %04X  std=%.3f  swap=%.3f\n",
+      desde + i, w0, w1, w2, w3, std / 1000.0, swap / 1000.0);
+  }
+}
+
 void ejecutarScan() {
   // Ptotal actual (referencia para reconocer S en el scan)
   float ptotal = lectura.valida ? lectura.potenciaTotal : 0;
@@ -214,6 +286,9 @@ void ejecutarScan() {
   Serial.println("-- gaps 3004-3025 y 3032-3051 --");
   escanearBloque(3004, 22);
   escanearBloque(3032, 20);
+  // Energía acumulada — comparar con el total kWh del display del medidor
+  Serial.println("-- energía 3204-3243 (Int64) --");
+  escanearEnergia(3204, 40);
   // 0-59 AL FINAL para que siempre sea visible
   Serial.println("-- 0-59 --");
   escanearBloque(0,  30);
