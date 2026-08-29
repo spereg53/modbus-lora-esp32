@@ -32,7 +32,7 @@
 HardwareSerial PzemSerial(1);
 
 // Dirección broadcast — habla con cualquier PZEM sin importar su dirección actual
-PZEM004Tv30 pzem(&PzemSerial, PZEM_RX, PZEM_TX, PZEM004_BROADCAST_ADDRESS);
+PZEM004Tv30 pzem(&PzemSerial, PZEM_RX, PZEM_TX, 0xF8);  // 0xF8 = broadcast address
 
 void setup() {
   Serial.begin(115200);
