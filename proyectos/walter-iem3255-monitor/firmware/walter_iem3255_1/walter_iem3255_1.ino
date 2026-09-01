@@ -55,7 +55,7 @@
 
 // Versión del firmware. Actualízala en cada cambio funcional; __DATE__/__TIME__
 // los pone el compilador solos, así el serial siempre dice qué build corre.
-#define FW_VERSION  "2026-09-01 diag-barato+qos0"
+#define FW_VERSION  "2026-09-01 hombre-muerto"
 
 // ═══ CONFIGURA AQUÍ ════════════════════════════════════════════════════════
 #define MODBUS_SLAVE_ID      1
@@ -72,8 +72,13 @@
 
 #define INTERVALO_LECTURA_MS 30000
 #define RECONEXION_MS        20000    // reintento de enlace tras caída
-#define MAX_RECONEXIONES     4        // tras N reintentos fallidos → ESP.restart()
 #define DIAG_DETALLE_MS      600000UL // cada 10 min: IP + señal (llamadas AT)
+// "Hombre muerto": si pasan más de esto SIN un publish exitoso, se reinicia
+// el ESP pase lo que pase (esté donde esté trabado el módem). Es el tope duro
+// de cuánto puede estar el dashboard sin datos. > umbral del dashboard (180 s)
+// para no preemptar una recuperación normal (que el código resuelve en <30 s).
+#define DEADMAN_MS           210000UL // 3.5 min sin publish OK → ESP.restart()
+#define REGISTRO_TIMEOUT_MS  120000UL // espera máx. de registro en red (antes 300 s)
 // ═══════════════════════════════════════════════════════════════════════════
 
 #define RS485_TX  17
@@ -120,7 +125,6 @@ unsigned long ultimoPublishOK     = 0;   // millis del último publish exitoso
 unsigned long ultimoDiagDetalle   = 0;   // millis del último DIAG con llamadas AT
 bool     mqttListo            = false;
 uint8_t  fallosMQTT           = 0;       // publish fallidos consecutivos
-uint8_t  reconexionesFallidas = 0;       // intentos de re-enlace consecutivos fallidos
 
 // Bandera puesta por el handler async del módem. El handler NO puede llamar
 // funciones de WalterModem ni bloquear: sólo marca la bandera.
@@ -345,8 +349,8 @@ bool redRegistrada() {
 // DIAG barato: sólo getters cacheados + contadores. Se llama en cada ciclo.
 void logDiagBarato() {
   unsigned long ahora = millis();
-  Serial.printf("\n[%lu] ── DIAG ── uptime %lus  mqttListo=%s  fallosPub=%u  reconFail=%u\n",
-    ahora, ahora / 1000, mqttListo ? "si" : "no", fallosMQTT, reconexionesFallidas);
+  Serial.printf("\n[%lu] ── DIAG ── uptime %lus  mqttListo=%s  fallosPub=%u\n",
+    ahora, ahora / 1000, mqttListo ? "si" : "no", fallosMQTT);
   if (ultimoPublishOK)
     Serial.printf("   último publish OK: hace %lus\n", (ahora - ultimoPublishOK) / 1000);
   else
@@ -403,8 +407,10 @@ bool inicializarModem() {
   unsigned long t0 = millis();
   while (!redRegistrada()) {
     delay(1000); Serial.print(".");
-    modem.tickleWatchdog();
-    if (millis() - t0 > 300000UL)
+    // NO se hace tickleWatchdog() aquí a propósito: si el registro se cuelga,
+    // que el watchdog HW reinicie (~305 s) en vez de babysitearlo. El timeout
+    // corto (120 s) hace que normalmente salgamos limpio antes de eso.
+    if (millis() - t0 > REGISTRO_TIMEOUT_MS)
       { Serial.println("\n[Modem] Timeout registro"); return false; }
   }
   Serial.println("\n[Modem] Registrado");
@@ -427,7 +433,6 @@ bool inicializarModem() {
   Serial.println("[MQTT] Conectado");
   mqttListo            = true;
   fallosMQTT           = 0;
-  reconexionesFallidas = 0;
   ultimoPublishOK      = millis();
   ultimoDiagDetalle    = 0;              // fuerza un DIAG detallado pronto
   evtMqttDesconectado  = false;          // limpiar cualquier URC del handshake
@@ -446,7 +451,6 @@ bool reconectarMQTT() {
   Serial.println("[MQTT] Reconectado");
   mqttListo            = true;
   fallosMQTT           = 0;
-  reconexionesFallidas = 0;
   ultimoPublishOK      = millis();
   evtMqttDesconectado  = false;
   return true;
@@ -511,27 +515,33 @@ void loop() {
   modem.tickleWatchdog();
   unsigned long ahora = millis();
 
+  // ── HOMBRE MUERTO ──────────────────────────────────────────────────────
+  // Tope duro: si no hay publish OK en DEADMAN_MS, reiniciar pase lo que pase.
+  // Cubre cualquier cuelgue donde el loop() siga girando (la lógica blanda no
+  // lo pudo recuperar). Si el loop() está totalmente trabado dentro de una
+  // llamada al módem, lo caza el watchdog HW (~305 s).
+  // ultimoPublishOK = 0 hasta el primer publish: el módem tiene hasta
+  // DEADMAN_MS desde el arranque para lograrlo, si no, reinicio y a empezar.
+  if (ahora - ultimoPublishOK > DEADMAN_MS) {
+    Serial.printf("[HOMBRE-MUERTO] %lus sin publish OK — ESP.restart()\n",
+      (ahora - ultimoPublishOK) / 1000);
+    delay(100);
+    ESP.restart();
+  }
+
   // Reaccionar al URC de desconexión aunque no toque publicar todavía.
   if (mqttListo && evtMqttDesconectado) {
     evtMqttDesconectado = false;
     marcarEnlaceCaido("URC desconexión MQTT");
   }
 
-  // Recuperación del enlace (sin bloquear el ritmo de lecturas).
+  // Recuperación del enlace (sin bloquear el ritmo de lecturas). Sin contador
+  // de reintentos: el hombre muerto de arriba es el que corta si nada funciona.
   if (!mqttListo && ahora - ultimoIntentoModem >= RECONEXION_MS) {
     ultimoIntentoModem = ahora;
-
-    if (reconexionesFallidas >= MAX_RECONEXIONES) {
-      Serial.println("[Modem] Demasiados reintentos — reiniciando...");
-      delay(200);
-      ESP.restart();
-    }
-
-    Serial.printf("[Modem] Recuperando enlace (intento %u/%u)...\n",
-      reconexionesFallidas + 1, MAX_RECONEXIONES);
+    Serial.println("[Modem] Recuperando enlace...");
     bool ok = redRegistrada() ? reconectarMQTT() : false;
-    if (!ok) ok = inicializarModem();      // camino completo si la ligera falla
-    if (!ok) reconexionesFallidas++;
+    if (!ok) inicializarModem();            // camino completo si la ligera falla
   }
 
   if (ahora - ultimaLectura >= INTERVALO_LECTURA_MS) {
