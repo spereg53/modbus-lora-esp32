@@ -53,6 +53,10 @@
 #include <ModbusMaster.h>
 #include <ArduinoJson.h>
 
+// Versión del firmware. Actualízala en cada cambio funcional; __DATE__/__TIME__
+// los pone el compilador solos, así el serial siempre dice qué build corre.
+#define FW_VERSION  "2026-09-01 diag-barato+qos0"
+
 // ═══ CONFIGURA AQUÍ ════════════════════════════════════════════════════════
 #define MODBUS_SLAVE_ID      1
 #define MODBUS_BAUD          9600
@@ -490,7 +494,9 @@ bool publicarMQTT() {
 void setup() {
   Serial.begin(115200);
   delay(2000);
-  Serial.println("\n=== Walter iEM3255 arrancando ===");
+  Serial.printf("\n=== Walter iEM3255 arrancando ===\n"
+                "    build: %s  (compilado %s %s)\n",
+                FW_VERSION, __DATE__, __TIME__);
 
   RS485Serial.begin(MODBUS_BAUD, SERIAL_8N1, RS485_RX, RS485_TX);
   node.begin(MODBUS_SLAVE_ID, RS485Serial);
