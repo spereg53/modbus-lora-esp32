@@ -110,9 +110,15 @@
     }
     const ageSec = (Date.now() - lastReceivedAt) / 1000;
     lastUpdateEl.textContent = 'Última lectura: hace ' + Math.floor(ageSec) + 's';
-    if (ageSec < 90) {
+    // El Walter publica cada 30s por celular; una o dos publicaciones
+    // perdidas son normales. Sólo marcamos "sin datos" pasados ~3 min, que
+    // ya es un corte real (el firmware se recupera solo en <1 min).
+    if (ageSec < 100) {
       statusDot.className = 'dot live';
       statusText.textContent = 'En vivo';
+    } else if (ageSec < 180) {
+      statusDot.className = 'dot live';
+      statusText.textContent = 'En vivo (última hace ' + Math.floor(ageSec) + 's)';
     } else {
       statusDot.className = 'dot stale';
       statusText.textContent = 'Sin datos recientes';

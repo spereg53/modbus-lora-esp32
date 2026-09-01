@@ -27,6 +27,25 @@
   NOTA SOBRE EL BUFFER: ModbusMaster tiene buffer de 64 registros.
   El bloque principal cubre 3000–3063. Para valores fuera de ese rango
   se hace un segundo bloque de lectura (3188–3207).
+
+  ─────────────────────────────────────────────────────────────────────────
+  ESTABILIDAD DEL ENLACE MQTT (por qué el dashboard se ponía en café):
+    Toda llamada a WalterModem puede BLOQUEAR hasta 300 s
+    (WALTER_MODEM_CMD_TIMEOUT_MS, no configurable en Arduino). Si el enlace
+    LTE-M de Telcel tiene un hueco, modem.mqttPublish() se queda bloqueado,
+    el loop se congela (ni lecturas ni publish) y el dashboard cruza su
+    umbral de "sin datos". Mitigaciones aquí:
+      1. Handlers async (mqttSetEventHandler / setRegistrationEventHandler)
+         que marcan la sesión como caída SIN bloquear ni llamar al módem.
+      2. Pre-chequeo BARATO (estado cacheado, sin AT) antes de cada publish:
+         si la red o la sesión MQTT ya están caídas, no se entra al
+         mqttPublish que bloquea 300 s.
+      3. Recuperación rápida: reconexión MQTT ligera (config+connect) si el
+         módem sigue registrado; init completo sólo si se perdió la red;
+         ESP.restart() sólo como último recurso.
+      4. Diagnóstico por serial cada ciclo (IP PDP, RSRP/RSRQ/RSSI, estado
+         de red y MQTT, segundos desde el último publish OK) para saber si
+         el problema es APN, cobertura o NAT/sesión.
 */
 
 #include <WalterModem.h>
@@ -44,8 +63,13 @@
 #define MQTT_PASS            "pegs530112"
 #define MQTT_TOPIC           "iem3255/walter01/state"
 #define MQTT_CLIENT_ID       "walter-iem3255-01"
+// keepAlive corto: publicamos cada 30 s, así el PINGREQ del módem cae dentro
+// de ese ritmo y una sesión muerta se detecta rápido (URC de desconexión).
+#define MQTT_KEEPALIVE_S     60
 
 #define INTERVALO_LECTURA_MS 30000
+#define RECONEXION_MS        15000   // reintento de enlace tras caída (rápido)
+#define MAX_RECONEXIONES     4       // tras N reintentos fallidos → ESP.restart()
 // ═══════════════════════════════════════════════════════════════════════════
 
 #define RS485_TX  17
@@ -86,10 +110,17 @@ ModbusMaster   node;
 WalterModem    modem;
 WalterModemRsp modemRsp = {};
 
-unsigned long ultimaLectura = 0;
+unsigned long ultimaLectura      = 0;
 unsigned long ultimoIntentoModem = 0;
-bool  mqttListo   = false;
-uint8_t fallosMQTT = 0;
+unsigned long ultimoPublishOK    = 0;   // millis del último publish exitoso
+bool     mqttListo           = false;
+uint8_t  fallosMQTT          = 0;       // publish fallidos consecutivos
+uint8_t  reconexionesFallidas = 0;      // intentos de re-enlace consecutivos fallidos
+
+// Flags puestos por los handlers async del módem. Los handlers NO pueden
+// llamar funciones de WalterModem ni bloquear: sólo marcan bandera.
+volatile bool evtMqttDesconectado = false;
+volatile bool evtRedPerdida       = false;
 
 struct LecturaIEM3255 {
   float corriente1, corriente2, corriente3;
@@ -291,11 +322,63 @@ void ejecutarScan() {
   Serial.println(">>>>> FIN SCAN <<<<<\n");
 }
 
+// ─── Handlers async del módem ─────────────────────────────────────────────
+// OJO: no llamar funciones de WalterModem aquí ni hacer nada bloqueante.
+// Sólo marcan bandera; el loop actúa sobre ellas.
+void onMqttEvent(WalterModemMQTTEvent ev, WalterModemMqttStatus status, void* args) {
+  if (ev == WALTER_MODEM_MQTT_EVENT_DISCONNECTED) evtMqttDesconectado = true;
+}
+
+void onRegEvent(WalterModemNetworkRegState st, void* args) {
+  bool ok = (st == WALTER_MODEM_NETWORK_REG_REGISTERED_HOME ||
+             st == WALTER_MODEM_NETWORK_REG_REGISTERED_ROAMING);
+  if (!ok) evtRedPerdida = true;
+}
+
 // ─── Módem ────────────────────────────────────────────────────────────────
 bool redRegistrada() {
   WalterModemNetworkRegState s = modem.getNetworkRegState();
   return (s == WALTER_MODEM_NETWORK_REG_REGISTERED_HOME ||
           s == WALTER_MODEM_NETWORK_REG_REGISTERED_ROAMING);
+}
+
+// Diagnóstico por serial: distingue si el problema es APN, cobertura o
+// NAT/sesión. Los estados cacheados (regState, mqttStatus) son gratis; las
+// consultas AT (IP, celda) sólo se hacen si el módem está registrado, para
+// no encolar comandos sobre un módem ya atascado.
+void logDiagnostico() {
+  unsigned long ahora = millis();
+  Serial.printf("\n[%lu] ── DIAG ─────────────────────────────\n", ahora);
+  Serial.printf("  uptime %lus  mqttListo=%s  fallosPub=%u  reconFail=%u\n",
+    ahora / 1000, mqttListo ? "si" : "no", fallosMQTT, reconexionesFallidas);
+  if (ultimoPublishOK)
+    Serial.printf("  último publish OK: hace %lus\n", (ahora - ultimoPublishOK) / 1000);
+  else
+    Serial.println("  último publish OK: nunca");
+
+  WalterModemNetworkRegState rs = modem.getNetworkRegState();
+  Serial.printf("  regState=%d (%s)   mqttStatus=%d\n",
+    (int)rs, redRegistrada() ? "registrado" : "NO registrado",
+    (int)modem.getMqttStatus());
+
+  if (redRegistrada()) {
+    static WalterModemRsp rsp = {};
+    const char* ip = NULL;
+    if (modem.getPDPAddress(&rsp)) ip = rsp.data.pdpAddressList.pdpAddress;
+    Serial.printf("  IP PDP: %s\n", (ip && ip[0]) ? ip : "(SIN IP — revisar APN/plan)");
+
+    if (modem.getCellInformation(WALTER_MODEM_SQNMONI_REPORTS_SERVING_CELL, &rsp)) {
+      Serial.printf("  celda: banda %u  op %s  RSRP %.1fdBm  RSRQ %.1fdB  RSSI %.1f  CINR %.1f\n",
+        rsp.data.cellInformation.band, rsp.data.cellInformation.netName,
+        rsp.data.cellInformation.rsrp, rsp.data.cellInformation.rsrq,
+        rsp.data.cellInformation.rssi, rsp.data.cellInformation.cinr);
+    } else {
+      Serial.println("  celda: (sin datos)");
+    }
+  } else {
+    Serial.println("  (módem no registrado — se omiten consultas AT)");
+  }
+  Serial.println("  ─────────────────────────────────────");
 }
 
 // Secuencia EXACTA de los ejemplos oficiales de WalterModem.
@@ -310,6 +393,13 @@ bool inicializarModem() {
   // módem se bloquea más que eso, el ESP reinicia en vez de congelarse.
   if (!WalterModem::begin(&Serial2, 30))
     { Serial.println("[Modem] No inicializa"); return false; }
+
+  // Handlers async (idempotente: sólo fija punteros). Detectan caídas de
+  // red / MQTT sin que el loop tenga que sondear al módem.
+  modem.mqttSetEventHandler(onMqttEvent);
+  modem.setRegistrationEventHandler(onRegEvent);
+  evtMqttDesconectado = false;
+  evtRedPerdida       = false;
 
   if (!modem.setOpState(WALTER_MODEM_OPSTATE_NO_RF))
     { Serial.println("[Modem] Error NO_RF"); return false; }
@@ -345,34 +435,70 @@ bool inicializarModem() {
 
   if (!modem.mqttConfig(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS))
     { Serial.println("[MQTT] Error config"); return false; }
-  if (!modem.mqttConnect(MQTT_HOST, MQTT_PORT))
+  if (!modem.mqttConnect(MQTT_HOST, MQTT_PORT, MQTT_KEEPALIVE_S))
     { Serial.println("[MQTT] Error conectando"); return false; }
 
   Serial.println("[MQTT] Conectado");
-  mqttListo   = true;
-  fallosMQTT  = 0;
+  mqttListo            = true;
+  fallosMQTT           = 0;
+  reconexionesFallidas = 0;
+  ultimoPublishOK      = millis();
   return true;
+}
+
+// Reconexión MQTT ligera: sólo config + connect, SIN reinicializar el módem
+// ni ciclar la radio. Vale la pena sólo si el módem sigue registrado (si no,
+// mqttConnect se bloquearía los 300 s esperando la red).
+bool reconectarMQTT() {
+  if (!redRegistrada()) return false;
+  Serial.println("[MQTT] Reconexión ligera (módem sigue en red)...");
+  modem.mqttDisconnect();
+  if (!modem.mqttConfig(MQTT_CLIENT_ID, MQTT_USER, MQTT_PASS)) return false;
+  if (!modem.mqttConnect(MQTT_HOST, MQTT_PORT, MQTT_KEEPALIVE_S)) return false;
+  Serial.println("[MQTT] Reconectado");
+  mqttListo            = true;
+  fallosMQTT           = 0;
+  reconexionesFallidas = 0;
+  ultimoPublishOK      = millis();
+  return true;
+}
+
+// Marca la sesión como caída para que el loop dispare la recuperación.
+void marcarEnlaceCaido(const char* motivo) {
+  Serial.printf("[MQTT] Enlace caído: %s → recuperación\n", motivo);
+  mqttListo = false;
+  ultimoIntentoModem = millis() - RECONEXION_MS;  // que reintente ya en el próximo loop
 }
 
 bool publicarMQTT() {
   if (!mqttListo) return false;
 
-  String p = armarPayloadJSON();
-  Serial.println("[MQTT] " + p);
+  // Pre-chequeo BARATO (estado cacheado, sin AT): si ya sabemos que el
+  // enlace está caído, NO entrar al mqttPublish que bloquea hasta 300 s.
+  if (evtMqttDesconectado) { evtMqttDesconectado = false; marcarEnlaceCaido("URC desconexión MQTT"); return false; }
+  if (evtRedPerdida)       { evtRedPerdida = false;       marcarEnlaceCaido("URC pérdida de red");   return false; }
+  if (!redRegistrada())    { marcarEnlaceCaido("red no registrada"); return false; }
+  WalterModemMqttStatus st = modem.getMqttStatus();
+  if (st == WALTER_MODEM_MQTT_NO_CONN || st == WALTER_MODEM_MQTT_CONN_LOST) {
+    marcarEnlaceCaido("mqttStatus sin conexión"); return false;
+  }
 
-  if (modem.mqttPublish(MQTT_TOPIC, (uint8_t*)p.c_str(), p.length())) {
-    fallosMQTT = 0;
+  String p = armarPayloadJSON();
+  Serial.printf("[%lu] [MQTT] %s\n", millis(), p.c_str());
+
+  if (modem.mqttPublish(MQTT_TOPIC, (uint8_t*)p.c_str(), p.length(), 1)) {
+    fallosMQTT      = 0;
+    ultimoPublishOK = millis();
     return true;
   }
 
   fallosMQTT++;
-  Serial.printf("[MQTT] Publish falló (%u/3)\n", fallosMQTT);
-  // NO reconectar aquí: mqttConnect bloquea minutos dentro del loop.
-  // Tras 3 fallos seguidos, reinicio limpio (igual que el ejemplo oficial).
-  if (fallosMQTT >= 3) {
-    Serial.println("[MQTT] Demasiados fallos — reiniciando...");
-    delay(200);
-    ESP.restart();
+  Serial.printf("[MQTT] Publish falló (%u/2)\n", fallosMQTT);
+  // A los 2 fallos seguidos damos la sesión por muerta y pasamos a
+  // recuperación (reconexión ligera → init completo → restart).
+  if (fallosMQTT >= 2) {
+    marcarEnlaceCaido("2 publish fallidos");
+    fallosMQTT = 0;
   }
   return false;
 }
@@ -396,15 +522,30 @@ void loop() {
   modem.tickleWatchdog();
   unsigned long ahora = millis();
 
-  // Reintento de conexión (sin bloquear el ritmo de lecturas)
-  if (!mqttListo && ahora - ultimoIntentoModem >= 60000UL) {
+  // Reaccionar a los eventos async aunque no toque publicar todavía.
+  if (mqttListo && evtMqttDesconectado) { evtMqttDesconectado = false; marcarEnlaceCaido("URC desconexión MQTT"); }
+  if (mqttListo && evtRedPerdida)       { evtRedPerdida = false;       marcarEnlaceCaido("URC pérdida de red");   }
+
+  // Recuperación del enlace (sin bloquear el ritmo de lecturas).
+  if (!mqttListo && ahora - ultimoIntentoModem >= RECONEXION_MS) {
     ultimoIntentoModem = ahora;
-    Serial.println("[Modem] Reintentando conexión...");
-    inicializarModem();
+
+    if (reconexionesFallidas >= MAX_RECONEXIONES) {
+      Serial.println("[Modem] Demasiados reintentos — reiniciando...");
+      delay(200);
+      ESP.restart();
+    }
+
+    Serial.printf("[Modem] Recuperando enlace (intento %u/%u)...\n",
+      reconexionesFallidas + 1, MAX_RECONEXIONES);
+    bool ok = redRegistrada() ? reconectarMQTT() : false;
+    if (!ok) ok = inicializarModem();      // camino completo si la ligera falla
+    if (!ok) reconexionesFallidas++;
   }
 
   if (ahora - ultimaLectura >= INTERVALO_LECTURA_MS) {
     ultimaLectura = ahora;
+    logDiagnostico();
     if (leerIEM3255()) publicarMQTT();
   }
 }
