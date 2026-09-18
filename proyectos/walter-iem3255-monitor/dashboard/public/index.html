@@ -23,6 +23,29 @@
 <main>
 
   <section class="section">
+    <h2 class="section-title">🩺 Diagnóstico del enlace</h2>
+    <div class="grid grid-4">
+      <div class="card diag-card">
+        <div class="card-title"><span class="dot" id="diag-dot-modbus"></span> Lectura del medidor (Modbus)</div>
+        <div class="diag-detail" id="diag-detail-modbus">--</div>
+      </div>
+      <div class="card diag-card">
+        <div class="card-title"><span class="dot" id="diag-dot-red"></span> Red celular</div>
+        <div class="diag-detail" id="diag-detail-red">--</div>
+      </div>
+      <div class="card diag-card">
+        <div class="card-title"><span class="dot" id="diag-dot-mqtt"></span> Publish MQTT</div>
+        <div class="diag-detail" id="diag-detail-mqtt">--</div>
+      </div>
+      <div class="card diag-card">
+        <div class="card-title"><span class="dot" id="diag-dot-boot"></span> Reinicios del Walter</div>
+        <div class="diag-detail" id="diag-detail-boot">--</div>
+      </div>
+    </div>
+    <div class="diag-footer" id="diag-lastUpdate">Diagnóstico: sin datos aún</div>
+  </section>
+
+  <section class="section">
     <h2 class="section-title">⚡ Instantáneo</h2>
     <div class="grid grid-4">
 

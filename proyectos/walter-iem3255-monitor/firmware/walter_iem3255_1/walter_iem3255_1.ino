@@ -47,15 +47,23 @@
         red → init completo si se perdió la red → ESP.restart() tras N.
       · DIAG detallado (IP, RSRP/RSRQ) sólo cada DIAG_DETALLE_MS (10 min),
         para saber si el problema de fondo es APN, cobertura o NAT/sesión.
+
+  DIAGNÓSTICO REMOTO (sin cable serial): cada ciclo se publica además un
+  segundo mensaje en MQTT_TOPIC_DIAG con el resultado de cada etapa (Modbus,
+  registro de red, publish MQTT), contador de reinicios (RTC) y el motivo del
+  último reinicio (esp_reset_reason: hombre-muerto/software, watchdog,
+  brownout, etc.) — ver armarDiagJSON()/publicarDiagMQTT(). El dashboard lo
+  muestra en el panel "Diagnóstico".
 */
 
 #include <WalterModem.h>
 #include <ModbusMaster.h>
 #include <ArduinoJson.h>
+#include <esp_system.h>
 
 // Versión del firmware. Actualízala en cada cambio funcional; __DATE__/__TIME__
 // los pone el compilador solos, así el serial siempre dice qué build corre.
-#define FW_VERSION  "2026-09-01 hombre-muerto"
+#define FW_VERSION  "2026-09-04 intervalo-5min+diag"
 
 // ═══ CONFIGURA AQUÍ ════════════════════════════════════════════════════════
 #define MODBUS_SLAVE_ID      1
@@ -67,17 +75,20 @@
 #define MQTT_USER            "sergio"
 #define MQTT_PASS            "pegs530112"
 #define MQTT_TOPIC           "iem3255/walter01/state"
+#define MQTT_TOPIC_DIAG       "iem3255/walter01/diag"   // salud del pipeline (ver publicarDiagMQTT)
 #define MQTT_CLIENT_ID       "walter-iem3255-01"
 #define MQTT_KEEPALIVE_S     60
 
-#define INTERVALO_LECTURA_MS 30000
+#define INTERVALO_LECTURA_MS 300000UL // 5 min entre lecturas/publish (antes 30 s)
 #define RECONEXION_MS        20000    // reintento de enlace tras caída
 #define DIAG_DETALLE_MS      600000UL // cada 10 min: IP + señal (llamadas AT)
 // "Hombre muerto": si pasan más de esto SIN un publish exitoso, se reinicia
 // el ESP pase lo que pase (esté donde esté trabado el módem). Es el tope duro
-// de cuánto puede estar el dashboard sin datos. > umbral del dashboard (180 s)
-// para no preemptar una recuperación normal (que el código resuelve en <30 s).
-#define DEADMAN_MS           210000UL // 3.5 min sin publish OK → ESP.restart()
+// de cuánto puede estar el dashboard sin datos. Se fija en 3 ciclos de lectura
+// (3×5 min) para dar margen a que la recuperación normal (reconexión ligera
+// cada RECONEXION_MS, o init completo) resuelva el enlace antes de forzar el
+// reinicio. El umbral de "sin datos" del dashboard usa este mismo valor.
+#define DEADMAN_MS           900000UL // 15 min sin publish OK → ESP.restart()
 #define REGISTRO_TIMEOUT_MS  120000UL // espera máx. de registro en red (antes 300 s)
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -130,6 +141,34 @@ uint8_t  fallosMQTT           = 0;       // publish fallidos consecutivos
 // funciones de WalterModem ni bloquear: sólo marca la bandera.
 volatile bool evtMqttDesconectado = false;
 
+// ── Diagnóstico del pipeline (para el topic MQTT_TOPIC_DIAG) ──────────────
+// bootCount vive en RTC: sobrevive a ESP.restart() y a los reinicios del
+// watchdog, pero se borra si se corta la alimentación. Sirve para ver en el
+// dashboard cuántas veces se ha reiniciado el Walter sin haberlo desenchufado.
+RTC_DATA_ATTR uint32_t bootCount = 0;
+uint16_t erroresModbusB1Consecutivos = 0;   // lecturas fallidas seguidas del bloque crítico (I/V/P)
+bool     diagBloque2OK               = false; // último intento del bloque FP/Q (3180-3199)
+bool     diagFrecuenciaOK            = false; // último intento del bloque de frecuencia (3106-3109)
+
+// Motivo del reinicio anterior, según el hardware/ESP-IDF (útil para separar
+// "hombre muerto"/software de un watchdog atascado o de un brownout de la
+// alimentación del módem, que son problemas distintos).
+const char* motivoReinicio() {
+  switch (esp_reset_reason()) {
+    case ESP_RST_POWERON:   return "encendido";
+    case ESP_RST_SW:        return "software (restart)";
+    case ESP_RST_PANIC:     return "panic";
+    case ESP_RST_INT_WDT:   return "watchdog-interrupcion";
+    case ESP_RST_TASK_WDT:  return "watchdog-tarea";
+    case ESP_RST_WDT:       return "watchdog";
+    case ESP_RST_DEEPSLEEP: return "deep-sleep";
+    case ESP_RST_BROWNOUT:  return "brownout (caida de voltaje)";
+    case ESP_RST_USB:       return "usb";
+    case ESP_RST_JTAG:      return "jtag";
+    default:                return "desconocido";
+  }
+}
+
 struct LecturaIEM3255 {
   float corriente1, corriente2, corriente3;
   float voltaje1, voltaje2, voltaje3;
@@ -171,8 +210,10 @@ bool leerIEM3255() {
   if (node.readHoldingRegisters(REG_BASE, REG_COUNT) != node.ku8MBSuccess) {
     Serial.println("[Modbus] Error bloque 1");
     lectura.valida = false;
+    erroresModbusB1Consecutivos++;
     return false;
   }
+  erroresModbusB1Consecutivos = 0;
   lectura.corriente1    = leerFloatCDAB(REG_BASE, 3000);
   lectura.corriente2    = leerFloatCDAB(REG_BASE, 3002);
   lectura.corriente3    = leerFloatCDAB(REG_BASE, 3008);
@@ -192,6 +233,7 @@ bool leerIEM3255() {
   lectura.frecuencia        = NAN;
 
   if (node.readHoldingRegisters(REG2_BASE, REG2_COUNT) == node.ku8MBSuccess) {
+    diagBloque2OK = true;
     lectura.factorPotencia    = leerFloatCDAB(REG2_BASE, ADDR_FP);
     lectura.potenciaReacTotal = leerFloatCDAB(REG2_BASE, ADDR_Q);
     if (ADDR_S > 0) {
@@ -203,14 +245,17 @@ bool leerIEM3255() {
         lectura.potenciaReacTotal * lectura.potenciaReacTotal);
     }
   } else {
+    diagBloque2OK = false;
     Serial.println("[Modbus] Error bloque 2 (FP/Q)");
   }
 
   // — Frecuencia: bloque 3106-3109 (4 regs, cubre ADDR_FREQ=3108) ————————
   delay(100);
   if (node.readHoldingRegisters(3106, 4) == node.ku8MBSuccess) {
+    diagFrecuenciaOK = true;
     lectura.frecuencia = leerFloatCDAB(3106, ADDR_FREQ);
   } else {
+    diagFrecuenciaOK = false;
     Serial.println("[Modbus] Error bloque frecuencia");
   }
 
@@ -494,13 +539,48 @@ bool publicarMQTT() {
   return false;
 }
 
+// ─── Diagnóstico del pipeline (topic aparte, MQTT_TOPIC_DIAG) ─────────────
+// A diferencia del payload de estado, éste se intenta publicar en CADA ciclo
+// sin importar si la lectura Modbus falló — es precisamente lo que permite
+// ver desde el dashboard, sin cable serial, en cuál etapa se atoró: el
+// medidor (Modbus), la red celular, o el enlace MQTT.
+String armarDiagJSON(bool modbusOK) {
+  JsonDocument doc;
+  doc["dispositivo"]           = MQTT_CLIENT_ID;
+  doc["ts"]                    = millis();
+  doc["fwVersion"]             = FW_VERSION;
+  doc["uptimeS"]                = millis() / 1000;
+  doc["bootCount"]             = bootCount;
+  doc["motivoReinicio"]        = motivoReinicio();
+  doc["modbusOK"]              = modbusOK;
+  doc["modbusErroresSeguidos"] = erroresModbusB1Consecutivos;
+  doc["modbusBloque2OK"]       = diagBloque2OK;
+  doc["modbusFrecuenciaOK"]    = diagFrecuenciaOK;
+  doc["modbusEnergiaOK"]       = lectura.energiaValida;
+  doc["redRegistrada"]         = redRegistrada();
+  doc["fallosMQTTSeguidos"]    = fallosMQTT;
+  doc["segSinPublishOK"]       = ultimoPublishOK ? (long)((millis() - ultimoPublishOK) / 1000) : -1;
+  String s; serializeJson(doc, s); return s;
+}
+
+// Best-effort: si esto falla no afecta al contador de fallos ni al hombre
+// muerto (eso ya lo cubre publicarMQTT() con el payload de estado).
+bool publicarDiagMQTT(bool modbusOK) {
+  if (!mqttListo || !redRegistrada()) return false;
+  String p = armarDiagJSON(modbusOK);
+  Serial.printf("[%lu] [DIAG-MQTT] %s\n", millis(), p.c_str());
+  return modem.mqttPublish(MQTT_TOPIC_DIAG, (uint8_t*)p.c_str(), p.length(), 0);
+}
+
 // ─── Setup / Loop ─────────────────────────────────────────────────────────
 void setup() {
   Serial.begin(115200);
   delay(2000);
+  bootCount++;
   Serial.printf("\n=== Walter iEM3255 arrancando ===\n"
-                "    build: %s  (compilado %s %s)\n",
-                FW_VERSION, __DATE__, __TIME__);
+                "    build: %s  (compilado %s %s)\n"
+                "    boot #%lu desde el último corte de energía — motivo: %s\n",
+                FW_VERSION, __DATE__, __TIME__, (unsigned long)bootCount, motivoReinicio());
 
   RS485Serial.begin(MODBUS_BAUD, SERIAL_8N1, RS485_RX, RS485_TX);
   node.begin(MODBUS_SLAVE_ID, RS485Serial);
@@ -553,6 +633,8 @@ void loop() {
       logDiagDetalle();
     }
 
-    if (leerIEM3255()) publicarMQTT();
+    bool modbusOK = leerIEM3255();
+    if (modbusOK) publicarMQTT();
+    publicarDiagMQTT(modbusOK);
   }
 }

@@ -12,6 +12,9 @@ const MQTT_URL = process.env.MQTT_URL || 'mqtts://mqtt.ocean53.xyz:8883';
 const MQTT_USERNAME = process.env.MQTT_USERNAME || '';
 const MQTT_PASSWORD = process.env.MQTT_PASSWORD || '';
 const MQTT_TOPIC = process.env.MQTT_TOPIC || 'iem3255/walter01/state';
+// Segundo topic del firmware con la salud del pipeline (Modbus/red/MQTT) —
+// se publica cada ciclo, incluso cuando la lectura del medidor falla.
+const MQTT_TOPIC_DIAG = process.env.MQTT_TOPIC_DIAG || MQTT_TOPIC.replace(/\/state$/, '/diag');
 const LIVE_BUFFER_LENGTH = parseInt(process.env.LIVE_BUFFER_LENGTH || '120', 10);
 const HISTORY_RETENTION_DAYS = parseInt(process.env.HISTORY_RETENTION_DAYS || '180', 10);
 const DB_PATH = process.env.DB_PATH || './data/iem3255.db';
@@ -139,6 +142,7 @@ function consultarConsumoDiario(dias) {
 
 // ---- Estado en memoria (para /api/latest y el buffer "en vivo") ----
 let latest = null; // { fields, ts, receivedAt }
+let latestDiag = null; // { fields, receivedAt } — último mensaje de MQTT_TOPIC_DIAG
 const liveBuffer = [];
 
 function pushReading(fields, deviceTs) {
@@ -162,9 +166,12 @@ const mqttClient = mqtt.connect(MQTT_URL, {
 });
 
 mqttClient.on('connect', () => {
-  console.log(`[mqtt] conectado a ${MQTT_URL}, suscribiendo a "${MQTT_TOPIC}"`);
+  console.log(`[mqtt] conectado a ${MQTT_URL}, suscribiendo a "${MQTT_TOPIC}" y "${MQTT_TOPIC_DIAG}"`);
   mqttClient.subscribe(MQTT_TOPIC, { qos: 0 }, (err) => {
     if (err) console.error('[mqtt] error al suscribir:', err.message);
+  });
+  mqttClient.subscribe(MQTT_TOPIC_DIAG, { qos: 0 }, (err) => {
+    if (err) console.error('[mqtt] error al suscribir (diag):', err.message);
   });
 });
 mqttClient.on('reconnect', () => console.log('[mqtt] reconectando...'));
@@ -172,13 +179,22 @@ mqttClient.on('close', () => console.log('[mqtt] conexión cerrada'));
 mqttClient.on('error', (err) => console.error('[mqtt] error:', err.message));
 
 mqttClient.on('message', (topic, payloadBuf) => {
+  let fields;
   try {
-    const fields = JSON.parse(payloadBuf.toString());
-    const reading = pushReading(fields, fields.ts);
-    broadcast(reading);
+    fields = JSON.parse(payloadBuf.toString());
   } catch (err) {
     console.error('[mqtt] no se pudo parsear el payload:', err.message);
+    return;
   }
+
+  if (topic === MQTT_TOPIC_DIAG) {
+    latestDiag = { fields, receivedAt: Date.now() };
+    broadcastDiag(latestDiag);
+    return;
+  }
+
+  const reading = pushReading(fields, fields.ts);
+  broadcast(reading);
 });
 
 // ---- Servidor HTTP + estáticos + API ----
@@ -196,12 +212,19 @@ app.get('/healthz', (req, res) => {
     mqttConnected: mqttClient.connected,
     hasData: latest !== null,
     filasHistorico: totalFilas,
+    diag: latestDiag ? { ...latestDiag.fields, receivedAt: latestDiag.receivedAt } : null,
   });
 });
 
 app.get('/api/latest', (req, res) => {
   if (!latest) return res.status(204).end();
   res.json(latest);
+});
+
+// Salud del pipeline reportada por el firmware (Modbus/red/MQTT), topic aparte.
+app.get('/api/diag', (req, res) => {
+  if (!latestDiag) return res.status(204).end();
+  res.json(latestDiag);
 });
 
 // Buffer corto en memoria (para las gráficas "en vivo")
@@ -247,8 +270,15 @@ function broadcast(reading) {
   });
 }
 
+function broadcastDiag(diag) {
+  const msg = JSON.stringify({ type: 'diag', payload: diag });
+  wss.clients.forEach((client) => {
+    if (client.readyState === client.OPEN) client.send(msg);
+  });
+}
+
 wss.on('connection', (ws) => {
-  ws.send(JSON.stringify({ type: 'init', payload: { latest, liveBuffer } }));
+  ws.send(JSON.stringify({ type: 'init', payload: { latest, latestDiag, liveBuffer } }));
 });
 
 process.on('SIGTERM', () => {

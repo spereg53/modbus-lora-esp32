@@ -110,13 +110,14 @@
     }
     const ageSec = (Date.now() - lastReceivedAt) / 1000;
     lastUpdateEl.textContent = 'Última lectura: hace ' + Math.floor(ageSec) + 's';
-    // El Walter publica cada 30s por celular; una o dos publicaciones
-    // perdidas son normales. Sólo marcamos "sin datos" pasados ~3 min, que
-    // ya es un corte real (el firmware se recupera solo en <1 min).
-    if (ageSec < 100) {
+    // El Walter publica cada 5 min por celular; una publicación perdida es
+    // normal. Sólo marcamos "sin datos" pasados 15 min (3 ciclos), que es
+    // el mismo umbral al que el firmware se fuerza a reiniciar solo
+    // ("hombre muerto" — ver DEADMAN_MS en el firmware).
+    if (ageSec < 400) {
       statusDot.className = 'dot live';
       statusText.textContent = 'En vivo';
-    } else if (ageSec < 180) {
+    } else if (ageSec < 900) {
       statusDot.className = 'dot live';
       statusText.textContent = 'En vivo (última hace ' + Math.floor(ageSec) + 's)';
     } else {
@@ -125,6 +126,66 @@
     }
   }
   setInterval(updateStatusLoop, 1000);
+
+  // ---------- panel de diagnóstico (topic MQTT_TOPIC_DIAG del firmware) ----------
+  let lastDiagReceivedAt = null;
+
+  function setDiagDot(id, ok) {
+    const el = $(id);
+    if (!el) return;
+    el.className = 'dot' + (ok === true ? ' live' : ok === false ? '' : ' stale');
+  }
+
+  function renderDiag(diag) {
+    if (!diag || !diag.fields) return;
+    const d = diag.fields;
+    lastDiagReceivedAt = diag.receivedAt || Date.now();
+
+    setDiagDot('diag-dot-modbus', d.modbusOK);
+    const detallesModbus = [];
+    if (d.modbusOK === false) detallesModbus.push((d.modbusErroresSeguidos ?? '?') + ' error(es) seguido(s)');
+    if (d.modbusBloque2OK === false) detallesModbus.push('FP/Q sin leer');
+    if (d.modbusFrecuenciaOK === false) detallesModbus.push('frecuencia sin leer');
+    if (d.modbusEnergiaOK === false) detallesModbus.push('energía sin leer');
+    $('diag-detail-modbus').textContent = d.modbusOK
+      ? (detallesModbus.length ? 'OK (' + detallesModbus.join(', ') + ')' : 'OK')
+      : 'Error leyendo el medidor' + (detallesModbus.length ? ' (' + detallesModbus.join(', ') + ')' : '');
+
+    setDiagDot('diag-dot-red', d.redRegistrada);
+    $('diag-detail-red').textContent = d.redRegistrada ? 'Registrado en la red celular' : 'Sin registro de red celular';
+
+    setDiagDot('diag-dot-mqtt', d.fallosMQTTSeguidos === 0);
+    const segPub = d.segSinPublishOK;
+    $('diag-detail-mqtt').textContent =
+      (d.fallosMQTTSeguidos > 0 ? d.fallosMQTTSeguidos + ' publish fallido(s) seguido(s) · ' : '') +
+      (typeof segPub === 'number' && segPub >= 0 ? 'último publish OK hace ' + segPub + 's' : 'sin publish OK aún');
+
+    setDiagDot('diag-dot-boot', (d.bootCount ?? 1) <= 1);
+    const uptimeMin = Math.floor((d.uptimeS ?? 0) / 60);
+    $('diag-detail-boot').textContent =
+      (d.bootCount ?? '?') + ' reinicio(s) · último motivo: ' + (d.motivoReinicio || '--') +
+      ' · uptime ' + uptimeMin + ' min';
+  }
+
+  function updateDiagStatusLoop() {
+    const footer = $('diag-lastUpdate');
+    if (!footer) return;
+    if (!lastDiagReceivedAt) { footer.textContent = 'Diagnóstico: sin datos aún'; return; }
+    const ageSec = Math.floor((Date.now() - lastDiagReceivedAt) / 1000);
+    // Mismo umbral que el estado principal: si a los 900s no llegó un nuevo
+    // diagnóstico, es porque el enlace MQTT mismo está caído (no tiene caso
+    // seguir mostrando el último estado como si fuera vigente).
+    if (ageSec >= 900) {
+      ['diag-dot-modbus', 'diag-dot-red', 'diag-dot-mqtt', 'diag-dot-boot'].forEach((id) => {
+        const el = $(id);
+        if (el) el.className = 'dot stale';
+      });
+      footer.textContent = 'Diagnóstico desactualizado (hace ' + ageSec + 's) — revisar enlace';
+    } else {
+      footer.textContent = 'Diagnóstico actualizado hace ' + ageSec + 's';
+    }
+  }
+  setInterval(updateDiagStatusLoop, 1000);
 
   // ---------- gráficas de línea (canvas, sin librerías externas) ----------
   // opts.fixedRange = [min, max]  → escala Y fija (evita que el ruido de
@@ -462,12 +523,20 @@
     pollTimer = setInterval(async () => {
       try {
         const res = await fetch('/api/latest', { cache: 'no-store' });
-        if (res.status === 204) return;
-        const reading = await res.json();
-        if (!liveHistory.length || reading.receivedAt !== liveHistory[liveHistory.length - 1].receivedAt) {
-          liveHistory.push(reading);
-          if (liveHistory.length > 120) liveHistory.shift();
-          renderReading(reading);
+        if (res.status !== 204) {
+          const reading = await res.json();
+          if (!liveHistory.length || reading.receivedAt !== liveHistory[liveHistory.length - 1].receivedAt) {
+            liveHistory.push(reading);
+            if (liveHistory.length > 120) liveHistory.shift();
+            renderReading(reading);
+          }
+        }
+      } catch (e) { /* silencioso, se reintenta en el próximo ciclo */ }
+      try {
+        const resDiag = await fetch('/api/diag', { cache: 'no-store' });
+        if (resDiag.status !== 204) {
+          const diag = await resDiag.json();
+          if (diag.receivedAt !== lastDiagReceivedAt) renderDiag(diag);
         }
       } catch (e) { /* silencioso, se reintenta en el próximo ciclo */ }
     }, 5000);
@@ -489,10 +558,13 @@
       if (msg.type === 'init') {
         liveHistory = (msg.payload.liveBuffer || []).slice();
         if (msg.payload.latest) renderReading(msg.payload.latest);
+        if (msg.payload.latestDiag) renderDiag(msg.payload.latestDiag);
       } else if (msg.type === 'reading') {
         liveHistory.push(msg.payload);
         if (liveHistory.length > 120) liveHistory.shift();
         renderReading(msg.payload);
+      } else if (msg.type === 'diag') {
+        renderDiag(msg.payload);
       }
     };
 
@@ -513,8 +585,14 @@
     })
     .catch(() => {});
 
+  fetch('/api/diag', { cache: 'no-store' })
+    .then((r) => (r.status === 204 ? null : r.json()))
+    .then((diag) => { if (diag) renderDiag(diag); })
+    .catch(() => {});
+
   cargarHistorico(horasActuales);
   cargarConsumoDiario(diasConsumo);
   connectWS();
   updateStatusLoop();
+  updateDiagStatusLoop();
 })();

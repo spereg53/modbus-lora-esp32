@@ -151,8 +151,11 @@ https://iem3255.istecnomed.com
 ```
 
 Con el firmware del Walter ya publicando, deberías ver el punto en verde
-("En vivo") y las tarjetas/gráficas actualizándose cada ~30s (o el intervalo
-que configures en `INTERVALO_LECTURA_MS` del .ino).
+("En vivo") y las tarjetas/gráficas actualizándose cada ~5 min (o el intervalo
+que configures en `INTERVALO_LECTURA_MS` del .ino). El panel "Diagnóstico del
+enlace" (arriba) muestra por separado si el problema, en caso de haberlo, está
+en la lectura Modbus del medidor, el registro en la red celular o el publish
+MQTT — llega por el topic `.../diag` que el firmware publica cada ciclo.
 
 Antes de tener el Walter en campo, puedes probar el pipeline completo
 publicando un mensaje de prueba a mano:
@@ -179,7 +182,7 @@ ssh root@161.35.58.65 "cd /opt/iem3255-dashboard && npm install --omit=dev && sy
 
 - El histórico persiste en `/opt/iem3255-dashboard/data/iem3255.db` (SQLite).
   Por defecto se conserva 180 días (`HISTORY_RETENTION_DAYS` en `.env`); las
-  filas más viejas se purgan solas cada 6h. A 1 lectura/30s son ~35MB en 180
+  filas más viejas se purgan solas cada 6h. A 1 lectura/5min son ~4MB en 180
   días — sin problema en un droplet de 1GB.
 - `/api/history?horas=N` agrega los datos en hasta 500 "buckets" (promedios)
   para no mandar de más al navegador en rangos largos (7d/30d).
