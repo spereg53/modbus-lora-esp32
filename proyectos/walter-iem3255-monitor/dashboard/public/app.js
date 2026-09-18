@@ -595,4 +595,64 @@
   connectWS();
   updateStatusLoop();
   updateDiagStatusLoop();
+
+  // ---------- exportar datos (Excel / CSV) por rango de fechas ----------
+  (function initExport() {
+    const inputDesde = $('export-desde');
+    const inputHasta = $('export-hasta');
+    const hint = $('export-hint');
+    const btnXlsx = $('btn-export-xlsx');
+    const btnCsv = $('btn-export-csv');
+    if (!inputDesde || !inputHasta || !btnXlsx || !btnCsv) return;
+
+    // input[type=datetime-local] espera "YYYY-MM-DDTHH:mm" en hora LOCAL del navegador.
+    function paraInputLocal(date) {
+      const pad = (n) => String(n).padStart(2, '0');
+      return date.getFullYear() + '-' + pad(date.getMonth() + 1) + '-' + pad(date.getDate()) +
+        'T' + pad(date.getHours()) + ':' + pad(date.getMinutes());
+    }
+
+    const ahora = new Date();
+    const hace24h = new Date(ahora.getTime() - 24 * 3600 * 1000);
+    inputHasta.value = paraInputLocal(ahora);
+    inputDesde.value = paraInputLocal(hace24h);
+
+    function setHint(msg, esError) {
+      hint.textContent = msg;
+      hint.classList.toggle('error', !!esError);
+    }
+    const HINT_DEFAULT = 'Excel incluye dos hojas (Lecturas y Diagnóstico); CSV sólo las lecturas.';
+
+    function rangoValido() {
+      const desdeMs = new Date(inputDesde.value).getTime();
+      const hastaMs = new Date(inputHasta.value).getTime();
+      if (!inputDesde.value || !inputHasta.value || Number.isNaN(desdeMs) || Number.isNaN(hastaMs)) {
+        setHint('Elige fecha/hora de inicio y de fin.', true);
+        return null;
+      }
+      if (hastaMs <= desdeMs) {
+        setHint('"Hasta" debe ser posterior a "Desde".', true);
+        return null;
+      }
+      setHint(HINT_DEFAULT, false);
+      return { desdeMs, hastaMs };
+    }
+
+    function descargar(formato) {
+      const rango = rangoValido();
+      if (!rango) return;
+      const url = `/api/export?formato=${formato}&desde=${rango.desdeMs}&hasta=${rango.hastaMs}`;
+      const a = document.createElement('a');
+      a.href = url;
+      a.rel = 'noopener';
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }
+
+    btnXlsx.addEventListener('click', () => descargar('xlsx'));
+    btnCsv.addEventListener('click', () => descargar('csv'));
+    inputDesde.addEventListener('change', rangoValido);
+    inputHasta.addEventListener('change', rangoValido);
+  })();
 })();

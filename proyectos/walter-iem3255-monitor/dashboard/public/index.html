@@ -184,6 +184,27 @@
   </section>
 
   <section class="section">
+    <h2 class="section-title">📥 Exportar datos</h2>
+    <div class="card export-card">
+      <div class="export-row">
+        <label class="export-field">
+          Desde
+          <input type="datetime-local" id="export-desde">
+        </label>
+        <label class="export-field">
+          Hasta
+          <input type="datetime-local" id="export-hasta">
+        </label>
+        <button class="btn btn-accent" id="btn-export-xlsx">⬇ Descargar Excel</button>
+        <button class="btn" id="btn-export-csv">⬇ Descargar CSV</button>
+      </div>
+      <div class="export-hint" id="export-hint">
+        Excel incluye dos hojas (Lecturas y Diagnóstico); CSV sólo las lecturas.
+      </div>
+    </div>
+  </section>
+
+  <section class="section">
     <div class="hist-header">
       <h2 class="section-title" style="margin:0">🗄 Histórico</h2>
       <div class="range-selector" id="rangeSelector">

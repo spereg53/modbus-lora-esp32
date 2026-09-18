@@ -6,6 +6,7 @@ const express = require('express');
 const mqtt = require('mqtt');
 const Database = require('better-sqlite3');
 const { WebSocketServer } = require('ws');
+const ExcelJS = require('exceljs');
 
 const PORT = process.env.PORT || 3001;
 const MQTT_URL = process.env.MQTT_URL || 'mqtts://mqtt.ocean53.xyz:8883';
@@ -69,12 +70,91 @@ function guardarEnHistorico(ts, fields) {
   insertStmt.run(row);
 }
 
+// ---- SQLite: histórico de diagnóstico (topic MQTT_TOPIC_DIAG) ----
+// Se guarda cada ciclo, igual que las lecturas, para poder exportar el
+// historial completo (no sólo el último mensaje, que es lo único que se
+// mantenía en memoria hasta ahora).
+const DIAG_CAMPOS = [
+  'fwVersion', 'uptimeS', 'bootCount', 'motivoReinicio',
+  'modbusOK', 'modbusErroresSeguidos', 'modbusBloque2OK', 'modbusFrecuenciaOK',
+  'modbusEnergiaOK', 'redRegistrada', 'fallosMQTTSeguidos', 'segSinPublishOK',
+];
+
+db.exec(`
+  CREATE TABLE IF NOT EXISTS diagnosticos (
+    ts INTEGER NOT NULL,
+    fwVersion TEXT,
+    uptimeS INTEGER,
+    bootCount INTEGER,
+    motivoReinicio TEXT,
+    modbusOK INTEGER,
+    modbusErroresSeguidos INTEGER,
+    modbusBloque2OK INTEGER,
+    modbusFrecuenciaOK INTEGER,
+    modbusEnergiaOK INTEGER,
+    redRegistrada INTEGER,
+    fallosMQTTSeguidos INTEGER,
+    segSinPublishOK INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS idx_diag_ts ON diagnosticos(ts);
+`);
+
+const insertDiagStmt = db.prepare(`
+  INSERT INTO diagnosticos (ts, ${DIAG_CAMPOS.join(', ')})
+  VALUES (@ts, ${DIAG_CAMPOS.map((c) => '@' + c).join(', ')})
+`);
+
+// better-sqlite3 no liga booleans de JS directamente — los mensajes del
+// firmware traen true/false, hay que pasarlos a 0/1 antes del INSERT.
+function boolAInt(v) {
+  return v === true ? 1 : v === false ? 0 : null;
+}
+
+function guardarDiagEnHistorico(ts, fields) {
+  insertDiagStmt.run({
+    ts,
+    fwVersion: fields.fwVersion ?? null,
+    uptimeS: typeof fields.uptimeS === 'number' ? fields.uptimeS : null,
+    bootCount: typeof fields.bootCount === 'number' ? fields.bootCount : null,
+    motivoReinicio: fields.motivoReinicio ?? null,
+    modbusOK: boolAInt(fields.modbusOK),
+    modbusErroresSeguidos: typeof fields.modbusErroresSeguidos === 'number' ? fields.modbusErroresSeguidos : null,
+    modbusBloque2OK: boolAInt(fields.modbusBloque2OK),
+    modbusFrecuenciaOK: boolAInt(fields.modbusFrecuenciaOK),
+    modbusEnergiaOK: boolAInt(fields.modbusEnergiaOK),
+    redRegistrada: boolAInt(fields.redRegistrada),
+    fallosMQTTSeguidos: typeof fields.fallosMQTTSeguidos === 'number' ? fields.fallosMQTTSeguidos : null,
+    segSinPublishOK: typeof fields.segSinPublishOK === 'number' ? fields.segSinPublishOK : null,
+  });
+}
+
 function limpiarHistoricoViejo() {
   const limite = Math.floor(Date.now() / 1000) - HISTORY_RETENTION_DAYS * 86400;
-  const info = db.prepare('DELETE FROM lecturas WHERE ts < ?').run(limite);
-  if (info.changes > 0) console.log(`[db] purgadas ${info.changes} filas viejas (> ${HISTORY_RETENTION_DAYS} días)`);
+  const infoLecturas = db.prepare('DELETE FROM lecturas WHERE ts < ?').run(limite);
+  const infoDiag = db.prepare('DELETE FROM diagnosticos WHERE ts < ?').run(limite);
+  if (infoLecturas.changes > 0 || infoDiag.changes > 0) {
+    console.log(`[db] purgadas ${infoLecturas.changes} lecturas + ${infoDiag.changes} diagnósticos viejos (> ${HISTORY_RETENTION_DAYS} días)`);
+  }
 }
 setInterval(limpiarHistoricoViejo, 6 * 3600 * 1000); // cada 6h
+
+// Trae lecturas/diagnósticos crudos (sin agregar) en un rango de tiempo —
+// usado por el export a Excel/CSV. desdeSeg/hastaSeg en epoch segundos.
+function consultarLecturasRango(desdeSeg, hastaSeg) {
+  return db.prepare(`
+    SELECT ts, ${CAMPOS.join(', ')} FROM lecturas
+    WHERE ts >= @desde AND ts <= @hasta
+    ORDER BY ts ASC
+  `).all({ desde: desdeSeg, hasta: hastaSeg });
+}
+
+function consultarDiagRango(desdeSeg, hastaSeg) {
+  return db.prepare(`
+    SELECT ts, ${DIAG_CAMPOS.join(', ')} FROM diagnosticos
+    WHERE ts >= @desde AND ts <= @hasta
+    ORDER BY ts ASC
+  `).all({ desde: desdeSeg, hasta: hastaSeg });
+}
 
 // Trae el histórico agrupado en "buckets" para no mandar de más al navegador
 // (ej: 30 días a 1 lectura/30s serían ~86,000 filas — las agregamos por
@@ -189,6 +269,7 @@ mqttClient.on('message', (topic, payloadBuf) => {
 
   if (topic === MQTT_TOPIC_DIAG) {
     latestDiag = { fields, receivedAt: Date.now() };
+    guardarDiagEnHistorico(Math.floor(latestDiag.receivedAt / 1000), fields);
     broadcastDiag(latestDiag);
     return;
   }
@@ -253,6 +334,80 @@ app.get('/api/consumo-diario', (req, res) => {
   } catch (err) {
     console.error('[db] error consultando consumo diario:', err.message);
     res.status(500).json({ error: 'error consultando consumo diario' });
+  }
+});
+
+// Exporta el histórico crudo para que el cliente lo baje a su computadora.
+// /api/export?formato=xlsx|csv&desde=<epoch_ms>&hasta=<epoch_ms>
+// - xlsx: dos hojas, "Lecturas" (voltaje/corriente/potencia/etc.) y
+//   "Diagnóstico" (salud del pipeline Modbus/red/MQTT).
+// - csv: sólo las lecturas (CSV no soporta varias hojas).
+function fechaCorta(tsSeg) {
+  return new Date(tsSeg * 1000).toISOString().slice(0, 10).replace(/-/g, '');
+}
+
+const MAX_RANGO_EXPORT_DIAS = 366;
+
+app.get('/api/export', async (req, res) => {
+  const formato = req.query.formato === 'csv' ? 'csv' : 'xlsx';
+  const desdeMs = parseInt(req.query.desde, 10);
+  const hastaMs = parseInt(req.query.hasta, 10);
+  if (!Number.isFinite(desdeMs) || !Number.isFinite(hastaMs) || hastaMs < desdeMs) {
+    return res.status(400).json({ error: 'parámetros desde/hasta inválidos (epoch ms)' });
+  }
+  if (hastaMs - desdeMs > MAX_RANGO_EXPORT_DIAS * 86400 * 1000) {
+    return res.status(400).json({ error: `rango máximo: ${MAX_RANGO_EXPORT_DIAS} días` });
+  }
+
+  const desde = Math.floor(desdeMs / 1000);
+  const hasta = Math.floor(hastaMs / 1000);
+  const sufijo = `${fechaCorta(desde)}-${fechaCorta(hasta)}`;
+
+  if (formato === 'csv') {
+    const filas = consultarLecturasRango(desde, hasta);
+    res.setHeader('Content-Type', 'text/csv; charset=utf-8');
+    res.setHeader('Content-Disposition', `attachment; filename="iem3255_walter01_${sufijo}.csv"`);
+    res.write(['fechaHoraUTC', ...CAMPOS].join(',') + '\n');
+    for (const f of filas) {
+      const linea = [new Date(f.ts * 1000).toISOString(), ...CAMPOS.map((c) => (f[c] ?? ''))];
+      res.write(linea.join(',') + '\n');
+    }
+    return res.end();
+  }
+
+  res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+  res.setHeader('Content-Disposition', `attachment; filename="iem3255_walter01_${sufijo}.xlsx"`);
+
+  try {
+    const workbook = new ExcelJS.stream.xlsx.WorkbookWriter({ stream: res, useStyles: true });
+
+    const hojaLecturas = workbook.addWorksheet('Lecturas');
+    hojaLecturas.columns = [
+      { header: 'Fecha/hora (UTC)', key: 'fechaHora', width: 22 },
+      ...CAMPOS.map((c) => ({ header: c, key: c, width: 16 })),
+    ];
+    for (const f of consultarLecturasRango(desde, hasta)) {
+      hojaLecturas.addRow({ fechaHora: new Date(f.ts * 1000).toISOString(), ...pickCampos(f) }).commit();
+    }
+    hojaLecturas.commit();
+
+    const hojaDiag = workbook.addWorksheet('Diagnóstico');
+    hojaDiag.columns = [
+      { header: 'Fecha/hora (UTC)', key: 'fechaHora', width: 22 },
+      ...DIAG_CAMPOS.map((c) => ({ header: c, key: c, width: 20 })),
+    ];
+    for (const f of consultarDiagRango(desde, hasta)) {
+      const row = { fechaHora: new Date(f.ts * 1000).toISOString() };
+      for (const c of DIAG_CAMPOS) row[c] = f[c];
+      hojaDiag.addRow(row).commit();
+    }
+    hojaDiag.commit();
+
+    await workbook.commit();
+  } catch (err) {
+    console.error('[export] error generando xlsx:', err.message);
+    if (!res.headersSent) res.status(500).json({ error: 'error generando el archivo' });
+    else res.end();
   }
 });
 
